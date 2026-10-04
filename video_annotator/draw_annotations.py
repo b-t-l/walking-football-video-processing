@@ -28,7 +28,7 @@ def frame_layout_scale(frame):
 
 
 ############################################### DRAW ALL ANNOTATIONS: Draw all the annotations onto the video we want:
-def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None):
+def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None):
     """Process multiple frames in a batch for better performance."""
     annotation_frames = []
 
@@ -47,7 +47,7 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
         
         # Apply annotations (consider vectorizing these operations)
         annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points)
-        annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED)
+        annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
         annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY)
         annotation_frame = draw_stats(annotation_frame, data)
         annotation_frame = draw_video_details(annotation_frame, frame_id, data, DETECTION_FPS,ORIGINAL_VIDEO_FPS)
@@ -145,7 +145,7 @@ def draw_pitch_detection_on_field(frame,frame_id,pitch_points):
 
 
 ############################################### DRAW PLAYER ANNOTATION ON FRAME VIDEO
-def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNING_SPEED):
+def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNING_SPEED,foot_pixel_fn=None):
 
     # Get the centre top pitch point ( we will use to place the annoation for each player/goalkeeper/ref on left or side of centre)
     #centre_top = next((kp for kp in pitch_points if kp['name'] == 'centre_top'), None)
@@ -219,7 +219,11 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
             cv2.circle(overlay, (x_min,y_max+4), 8, color, -1)
         '''
         ##### draw the plus sign showing the foot position and team color:
-        if object_placement == 'left' and object['class_name'] != "ball":
+        foot_px = foot_pixel_fn(x_min, y_min, x_max, y_max) if foot_pixel_fn else None
+        if foot_px is not None:
+            # smooth foot position (same point the database metres were computed from)
+            center_x, center_y = int(round(foot_px[0])), int(round(foot_px[1]))
+        elif object_placement == 'left' and object['class_name'] != "ball":
             # Calculate the center of the plus sign
             center_x, center_y = x_max, y_max + 4
         elif object_placement == 'right' and object['class_name'] != "ball":

@@ -127,6 +127,7 @@ class FittedPitchTransformer:
 
         self._build_constraints()
         self._fit()
+        self._estimate_vertical_vp()
 
         if self.verbose:
             self._print_diagnostics()
@@ -287,6 +288,123 @@ class FittedPitchTransformer:
         norm = self._undistort(pix, self.k1, self.k2)
         return self._apply_homography(norm, self._h)
 
+    # ----------------------------------------------- vertical vanishing point + foot position
+    @property
+    def has_vertical_vp(self):
+        return self.vertical_vp is not None
+
+    def _estimate_vertical_vp(self):
+        """
+        Estimate where real-world VERTICAL lines converge in the image (the point below the camera,
+        since it looks down at the pitch). Uses the goal posts clicked in the Pitch Calibrator:
+        goal_posts_*_vertices = [left post base, left post top, right post top, right post base],
+        i.e. two vertical lines per goal. Done in the lens-corrected (undistorted) plane, where
+        straight lines are straight and verticals genuinely converge. Needs >= 2 lines.
+        """
+        self.vertical_vp = None
+        self.vertical_line_residuals_deg = []
+        lines = []
+        for key in ('goal_posts_left_vertices', 'goal_posts_right_vertices'):
+            pts = self.calibration.get(key) or []
+            if len(pts) == 4:
+                for a, b in ((0, 1), (3, 2)):          # (base, top) of each post
+                    if pts[a] and pts[b]:
+                        lines.append((pts[a], pts[b]))
+        for vl in self.calibration.get('vertical_lines', []) or []:
+            if vl.get('base') and vl.get('top'):
+                lines.append((vl['base'], vl['top']))
+        if len(lines) < 2:
+            return
+
+        base = self._undistort(np.array([[l[0]['x'], l[0]['y']] for l in lines], dtype=np.float64), self.k1, self.k2)
+        top = self._undistort(np.array([[l[1]['x'], l[1]['y']] for l in lines], dtype=np.float64), self.k1, self.k2)
+
+        A = np.zeros((2, 2))
+        rhs = np.zeros(2)
+        for p0, p1 in zip(base, top):
+            d = p1 - p0
+            length = np.linalg.norm(d)
+            if length < 1e-9:
+                continue
+            d = d / length
+            P = np.eye(2) - np.outer(d, d)             # projects onto the normal of this line
+            A += length * P                            # longer lines count for more
+            rhs += length * (P @ p0)
+        try:
+            vp = np.linalg.solve(A, rhs)
+        except np.linalg.LinAlgError:
+            return
+
+        # sanity: every post must point TOWARD the vanishing point going from its top to its base
+        residuals = []
+        for p0, p1 in zip(base, top):
+            toward = vp - p0
+            along = p0 - p1
+            if np.dot(toward, along) <= 0:
+                if self.verbose:
+                    print("  WARNING: goal-post lines do not converge below the camera - ignoring them "
+                          "(check the base/top clicks); using the legacy foot-point rule.")
+                return
+            cosang = np.dot(toward, along) / (np.linalg.norm(toward) * np.linalg.norm(along))
+            residuals.append(float(np.degrees(np.arccos(np.clip(cosang, -1, 1)))))
+        self.vertical_vp = vp
+        self.vertical_line_residuals_deg = residuals
+        self.n_vertical_lines = len(lines)
+
+    def _foot_undistorted(self, xmin, ymin, xmax, ymax):
+        """
+        Foot position (undistorted plane) of a player's bounding box. The body's upright axis passes
+        through the box centre and points at the vertical vanishing point; the feet are where that axis
+        reaches the bottom of the box. This slides the foot smoothly sideways with distance from the
+        vanishing point (replacing the old left/right-of-halfway-line corner rule, which jumped by a
+        whole box width as a player crossed the line).
+        """
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        centre, bottom = self._undistort(np.array([[cx, cy], [cx, ymax]], dtype=np.float64), self.k1, self.k2)
+        if self.vertical_vp is None:
+            return bottom
+        dy = self.vertical_vp[1] - centre[1]
+        if dy <= 1e-9:
+            return bottom
+        t = float(np.clip((bottom[1] - centre[1]) / dy, 0.0, 1.0))
+        return centre + t * (self.vertical_vp - centre)
+
+    def transform_foot(self, xmin, ymin, xmax, ymax):
+        """World metres (x, y) of a player's feet from their bounding box (see _foot_undistorted)."""
+        f = self._foot_undistorted(xmin, ymin, xmax, ymax)
+        world = self._apply_homography(f.reshape(1, 2), self._h)
+        return float(world[0, 0]), float(world[0, 1])
+
+    def _distort(self, norm):
+        """Inverse of the radial lens correction: undistorted normalised point -> normalised pixel offset."""
+        q = np.atleast_2d(norm).astype(np.float64)
+        ru = np.hypot(q[:, 0], q[:, 1])
+        lo = np.zeros_like(ru)
+        hi = np.maximum(ru, 1e-6)
+        for _ in range(60):                                       # grow the bracket until it contains the answer
+            f = hi * (1 + self.k1 * hi ** 2 + self.k2 * hi ** 4)
+            short = f < ru
+            if not short.any():
+                break
+            hi = np.where(short, hi * 2, hi)
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            f = mid * (1 + self.k1 * mid ** 2 + self.k2 * mid ** 4)
+            lo = np.where(f < ru, mid, lo)
+            hi = np.where(f < ru, hi, mid)
+        rd = (lo + hi) / 2
+        scale = np.divide(rd, ru, out=np.ones_like(ru), where=ru > 1e-12)
+        return q * scale[:, None]
+
+    def foot_pixel(self, xmin, ymin, xmax, ymax):
+        """Pixel (x, y) in the original frame where transform_foot() puts the feet (for drawing)."""
+        if self.vertical_vp is None:
+            return None
+        f = self._foot_undistorted(xmin, ymin, xmax, ymax)
+        d = self._distort(f.reshape(1, 2))[0]
+        return float(d[0] * self._scale + self._cx), float(d[1] * self._scale + self._cy)
+
     def overlay_geometry(self):
         """
         Geometry for drawing an ACCURACY-TEST overlay on the top-view inset:
@@ -338,6 +456,12 @@ class FittedPitchTransformer:
             worst_name = self._outline_names[worst_idx]
             worst_err = float(np.linalg.norm(self._outline_residuals[worst_idx]))
             print(f"  worst outline point : {worst_name} ({worst_err:.3f} m)")
+        if self.vertical_vp is not None:
+            res = self.vertical_line_residuals_deg
+            print(f"  vertical vanishing point : found from {self.n_vertical_lines} post lines "
+                  f"(worst line off by {max(res):.1f} deg) -> smooth foot-point correction ON")
+        else:
+            print("  vertical vanishing point : none (no goal posts clicked) -> legacy corner foot-point rule")
         if self.width in (30.0,) and self.length in (45.0,):
             print("  NOTE: pitch width/length look like CWFF-range placeholders, not a measured "
                   "pitch -- confirm real dimensions to improve fit accuracy.")

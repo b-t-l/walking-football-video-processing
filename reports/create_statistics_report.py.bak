@@ -88,8 +88,10 @@ class CreateStatisticsReport:
         for row in tqdm(results, desc="Processing player data", unit="record"):
             tracker_id, team, team_color, distance, speed, ball_posession, frame_id, x_transformed_metres, y_transformed_metres = row
 
-            # DISTANCE: calculated separately (see calculate_team_distances) - the database column
-            # total_distance_metres is a RUNNING total per tracker, so it must not be summed row by row.
+            # DISTANCE: Aggregate total distance per team
+            if team not in distance_data:
+                distance_data[team] = 0.0
+            distance_data[team] += distance or 0.0
 
             # SPEED: Track max speed per tracker ID
             if speed is not None:  # Check if speed is not None
@@ -147,43 +149,7 @@ class CreateStatisticsReport:
                 last_possession_change_frame = frame_id
                 previous_team = team
 
-        distance_data = self.calculate_team_distances()
-
         return distance_data, max_speeds, tracker_colors, possession_data, team_colors, speed_details, possession_counts, ball_giveaways, successful_passes
-
-
-    ########################### DISTANCE PER TEAM:
-    def calculate_team_distances(self):
-        """
-        total_distance_metres is a RUNNING total for each tracker_id (it grows frame by frame), so the
-        distance covered in one frame is the change from that tracker's previous row. Summing those
-        per-frame changes by the team shown on each row gives the real distance covered per team,
-        and still works when the tracker's team label flips part-way through a track.
-        """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT tracker_id, team, total_distance_metres
-            FROM detected_objects
-            WHERE class_name = "player"
-            ORDER BY tracker_id, frame_id
-        ''')
-        rows = cursor.fetchall()
-        conn.close()
-
-        distance_data = {}
-        previous_tracker = None
-        previous_total = 0.0
-        for tracker_id, team, total in rows:
-            total = total or 0.0
-            if tracker_id != previous_tracker:
-                previous_total = 0.0
-                previous_tracker = tracker_id
-            step = max(total - previous_total, 0.0)
-            previous_total = total
-            if team in self.TEAM_NAMES and team not in ("Referee", "Goalkeeper"):
-                distance_data[team] = distance_data.get(team, 0.0) + step
-        return distance_data
 
 
     ########################### ADD PAGES TO THE PDF:

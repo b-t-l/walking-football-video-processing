@@ -22,7 +22,7 @@ def main():
     RUN_TRANSFORMATIONS = True  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = False   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = True  # create annotated video
-    RUN_MATCH_REPORT_CREATOR = False  # create match report/statistics
+    RUN_MATCH_REPORT_CREATOR = True  # create match report/statistics
 
     # DETECTION SETTINGS FOR VIDEO:
     PITCH_DETECTION_OVERRIDE = True    # do we want to overide pitch detection and rather temp provide the vertices from our logger file instead ?

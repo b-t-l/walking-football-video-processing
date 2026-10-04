@@ -76,11 +76,14 @@ class CreateVideoAnnotated:
             self.PITCH_WIDTH_M = float(pitch_dims['width'])
             # accuracy-test overlay: ideal circles/arcs + where the clicked circle points land
             from view_transformer.fitted_pitch_transformer import FittedPitchTransformer
-            self.PITCH_OVERLAY = FittedPitchTransformer(json.loads(calibrator_json), verbose=False).overlay_geometry()
+            _fitted = FittedPitchTransformer(json.loads(calibrator_json), verbose=False)
+            self.PITCH_OVERLAY = _fitted.overlay_geometry()
+            self.FOOT_PIXEL_FN = _fitted.foot_pixel if _fitted.has_vertical_vp else None
         else:
             self.PITCH_LENGTH_M = 46.0
             self.PITCH_WIDTH_M = 21.0
             self.PITCH_OVERLAY = None
+            self.FOOT_PIXEL_FN = None
 
         self.PITCH_DETECTION_OVERRIDE = PITCH_DETECTION_OVERRIDE
         self.PITCH_OVERRIDE_KEYPOINTS = GAME_PITCH_KEYPOINTS_WITH_NAMES
@@ -329,7 +332,8 @@ class CreateVideoAnnotated:
                                 self.GAME_RUNNING_SPEED,
                                 self.PITCH_LENGTH_M,
                                 self.PITCH_WIDTH_M,
-                                self.PITCH_OVERLAY
+                                self.PITCH_OVERLAY,
+                                self.FOOT_PIXEL_FN
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy

@@ -194,8 +194,12 @@ class CreateViewTransformations():
         # TRANSFORM: 
         if self.PITCH_DETECTION_OVERRIDE == True:
             if self.USE_FITTED_TRANSFORMER:
-                # fitted radial-distortion + homography model, fresh-fit for this video
-                x_transformed, y_transformed = self.fitted_transformer.transform_point(point_x, point_y)
+                if self.fitted_transformer.has_vertical_vp and class_name != 'ball':
+                    # smooth foot position from the box + where verticals converge (goal posts)
+                    x_transformed, y_transformed = self.fitted_transformer.transform_foot(xmin, ymin, xmax, ymax)
+                else:
+                    # fitted radial-distortion + homography model, fresh-fit for this video
+                    x_transformed, y_transformed = self.fitted_transformer.transform_point(point_x, point_y)
             else:
                 # legacy: flat perspective transformer from the gamelogger excel (constant)
                 reshaped_point = np.array([[[point_x,point_y]]], dtype=np.float32)
