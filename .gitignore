@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local video, generated output, and temporary files
+input_videos/
+*.mp4
+*.db
+output/
+images_object_detection/
+temp_files.txt
+
+# Notebook embeds a Roboflow API key
+models/pitch_detection_testor.ipynb
