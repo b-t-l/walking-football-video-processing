@@ -27,31 +27,7 @@ def frame_layout_scale(frame):
     return scale, width, height
 
 
-# ---- look of the overlays on the video (tweak here) ----
-PITCH_DOT_RADIUS = 6            # corner dots (was 15)
-PITCH_DOT_ALPHA = 0.35
-PITCH_LINE_THICKNESS = 2
-PITCH_LINE_ALPHA = 0.18         # pitch outline, lower = more transparent
-BOX_ALPHA_NORMAL = 0.12         # ordinary player box (team colour): barely there
-BOX_ALPHA_ORANGE = 0.75         # 10-15 km/h
-BOX_THICKNESS_RUNNING = 3       # red (>15 km/h) is fully opaque
-BRACKET_FRACTION = 0.28         # running boxes are corner brackets: each arm = this share of the box's shorter side
-BRACKET_MIN_PX, BRACKET_MAX_PX = 10, 34
-LABEL_FONT_SCALE = 0.6          # speed label shown only for running players
-
-def draw_corner_brackets(img, x0, y0, x1, y1, color, thickness):
-    arm = int(max(BRACKET_MIN_PX, min(BRACKET_MAX_PX, BRACKET_FRACTION * min(x1 - x0, y1 - y0))))
-    for cx, cy, dx, dy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
-        cv2.line(img, (cx, cy), (cx + dx * arm, cy), color, thickness, cv2.LINE_AA)
-        cv2.line(img, (cx, cy), (cx, cy + dy * arm), color, thickness, cv2.LINE_AA)
-
-def draw_outlined_text(img, text, org, scale=LABEL_FONT_SCALE):
-    # white text with a dark outline: readable on grass, shirts and sky alike
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 1, cv2.LINE_AA)
-
-
-def compute_bottom_layout(frame, panel_top_fraction, pitch_length_m, pitch_width_m, pitch_outline_frac=None):
+def compute_bottom_layout(frame, panel_top_fraction, pitch_length_m, pitch_width_m):
     """
     Where everything in the black bottom panel goes, for a panel that starts at row panel_top
     (panel_top_fraction = how far down the frame it starts, 0-1, chosen just below the pitch so the
@@ -73,63 +49,22 @@ def compute_bottom_layout(frame, panel_top_fraction, pitch_length_m, pitch_width
         inset_h = int(round(inset_w * pitch_width_m / pitch_length_m))
     inset_x = margin
     inset_y = panel_top + margin
-
-    # GROW THE OVERHEAD: the video below the near touchline curves away at the bottom-left (that corner is just
-    # surround/netting), so the overhead may reach up into the video there as long as it never covers the pitch.
-    # pitch_outline_frac = the pitch boundary as fractions of the frame (x/width, y/height).
-    if pitch_outline_frac is not None and len(pitch_outline_frac):
-        outline = np.asarray(pitch_outline_frac, dtype=float) * np.array([width, height], dtype=float)
-        clearance = max(6, int(0.015 * height))
-        aspect = pitch_length_m / pitch_width_m
-        y_bottom = height - margin
-        best_h = inset_h
-        for h in range(inset_h, int(0.5 * height) + 1, 2):
-            w = int(round(h * aspect))
-            if w > max_w:
-                break
-            y0, x1 = y_bottom - h, inset_x + w
-            covers_pitch = ((outline[:, 0] >= inset_x - clearance) & (outline[:, 0] <= x1 + clearance)
-                            & (outline[:, 1] >= y0 - clearance)).any()
-            if covers_pitch:
-                break
-            best_h = h
-        inset_h = best_h
-        inset_w = int(round(inset_h * aspect))
-        inset_y = y_bottom - inset_h
     return {
         'panel_top': panel_top, 'margin': margin,
         'inset_x': inset_x, 'inset_y': inset_y, 'inset_w': inset_w, 'inset_h': inset_h,
-        # text sits inside the black panel (never straddling its top edge), even when the overhead grew above it
-        'stats_x': inset_x + inset_w + 3 * margin, 'stats_y': panel_top + margin,
-        'details_x': width - int(560 * scale), 'details_y': panel_top + margin + max(14, int(30 * scale)),
+        'stats_x': inset_x + inset_w + 3 * margin, 'stats_y': inset_y,
+        'details_x': width - int(560 * scale), 'details_y': inset_y + max(14, int(30 * scale)),
     }
 
 
-def compute_top_mask_polygon(frame, top_mask_frac):
-    """
-    Black polygon for the top of the frame (the safety netting): everything above the line through the
-    clicked points (fractions of the frame, left to right), out to the left, right and top edges.
-    Returns None when fewer than 2 points are given.
-    """
-    if not top_mask_frac or len(top_mask_frac) < 2:
-        return None
-    height, width = frame.shape[:2]
-    pts = sorted(((fx * width, fy * height) for fx, fy in top_mask_frac), key=lambda p: p[0])
-    poly = [(0, 0), (width, 0), (width, pts[-1][1])] + pts[::-1] + [(0, pts[0][1])]
-    return np.array(poly, dtype=np.int32)
-
-
 ############################################### DRAW ALL ANNOTATIONS: Draw all the annotations onto the video we want:
-def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None):
+def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None):
     """Process multiple frames in a batch for better performance."""
     annotation_frames = []
 
     frame_height, frame_width = frames[0].shape[:2]
     scale, _, _ = frame_layout_scale(frames[0])
-    layout = compute_bottom_layout(frames[0], PANEL_TOP_FRACTION, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OUTLINE_FRAC)
-    top_mask_polygon = compute_top_mask_polygon(frames[0], TOP_MASK_FRAC)
-    outline_px = (np.asarray(PITCH_OUTLINE_FRAC, dtype=float) * np.array([frame_width, frame_height], dtype=float)
-                  if PITCH_OUTLINE_FRAC is not None and len(PITCH_OUTLINE_FRAC) else None)
+    layout = compute_bottom_layout(frames[0], PANEL_TOP_FRACTION, PITCH_LENGTH_M, PITCH_WIDTH_M)
     panel_top = layout['panel_top'] if layout else min(int(REF_PANEL_TOP * scale), frame_height)
 
     # Process frames in batch
@@ -139,14 +74,10 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
 
         # Black panel under the pitch map. Rows are [y1:y2], columns are [x1:x2].
         annotation_frame[panel_top:frame_height, 0:frame_width] = 0
-
-        # Black out the netting: everything above the line clicked along its lower edge (Pitch Calibrator).
-        if top_mask_polygon is not None:
-            cv2.fillPoly(annotation_frame, [top_mask_polygon], (0, 0, 0))
         
         
         # Apply annotations (consider vectorizing these operations)
-        annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
+        annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points)
         annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
         annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY, layout)
         annotation_frame = draw_stats(annotation_frame, data, layout=layout)
@@ -201,30 +132,45 @@ def is_point_left_or_right(pitch_keypoints, obj_x, obj_y):
         return 'centre'
     
 ##################################### -- draws the predicted pitch outline on the video
-def draw_pitch_detection_on_field(frame,frame_id,pitch_points,outline_px=None):
-    """Corner dots + pitch outline. outline_px = dense curved outline in frame pixels (follows the lens
-    curvature); without it the dots are joined by straight lines."""
+def draw_pitch_detection_on_field(frame,frame_id,pitch_points):
 
-    dots = frame.copy()
-    lines = frame.copy()
+    overlay = frame.copy()
 
+    # Draw the pitch keypoints:
     for i in range(len(pitch_points)):
+        
+        # Extract details of the current keypoint
+        #frame_id = pitch_points[i]['frame_id']
         name = pitch_points[i]['name']
-        point = (int(pitch_points[i]['x']), int(pitch_points[i]['y']))
-        cv2.circle(dots, point, PITCH_DOT_RADIUS, (0, 255, 0), -1, cv2.LINE_AA)
-        cv2.putText(frame, name, (point[0], point[1] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (255, 255, 255), 1, cv2.LINE_AA)
-        if outline_px is None:
-            next_point = (int(pitch_points[(i + 1) % len(pitch_points)]['x']),
-                          int(pitch_points[(i + 1) % len(pitch_points)]['y']))
-            cv2.line(lines, point, next_point, (0, 255, 0), PITCH_LINE_THICKNESS, cv2.LINE_AA)
+        x = pitch_points[i]['x']
+        y = pitch_points[i]['y']
+        point = (int(x), int(y))
 
-    if outline_px is not None:
-        cv2.polylines(lines, [np.asarray(outline_px, dtype=np.int32).reshape(-1, 1, 2)], True,
-                      (0, 255, 0), PITCH_LINE_THICKNESS, cv2.LINE_AA)
+        # Draw a circle for the keypoint
+        cv2.circle(overlay, point, 15, (0, 255, 0), -1)  # Red point
 
-    cv2.addWeighted(lines, PITCH_LINE_ALPHA, frame, 1 - PITCH_LINE_ALPHA, 0, frame)
-    cv2.addWeighted(dots, PITCH_DOT_ALPHA, frame, 1 - PITCH_DOT_ALPHA, 0, frame)
+        # Add the name text below the circle
+        text_position = (point[0], point[1] + 25)  # Slightly below the circle
+        cv2.putText(
+            frame,
+            name,
+            text_position,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,  # Font size
+            (255, 255, 255),  # White color
+            1,  # Thickness
+            cv2.LINE_AA,
+        )
+
+        # Draw a line to the next keypoint (cyclically connecting the last to the first)
+        next_index = (i + 1) % len(pitch_points)  # Wrap around to form a loop
+        next_point = (int(pitch_points[next_index]['x']), int(pitch_points[next_index]['y']))
+        cv2.line(overlay, point, next_point, (0, 255, 0), 2)  # Green line
+
+    # Blend the overlay with the original frame using transparency
+    alpha = 0.4  # Set the transparency level (0.0 to 1.0)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)  # Blend the overlay with the original frame
+
     return frame
 
 
@@ -265,7 +211,6 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
     # Create an overlay for the object detections as we want all this dat to be slightly transparent.
     overlay = frame.copy()  # Create a copy of the frame for the overlay
 
-    normal_boxes, orange_boxes, red_boxes, running_labels = [], [], [], []
     # Draw the transformed points of players on the video:
     for object in data:
         
@@ -370,15 +315,10 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
         #print(f"speed: {speed} - {speed_line_length}")
         
         ### Draw a bounding box around the player with different color for running:
-        # (drawn after the main blend, each with its own opacity)
-        if speed > 15:
-            red_boxes.append((x_min, y_min, x_max, y_max))
-            running_labels.append((x_min, y_min, f"{int(object['tracker_id'])} - {speed:.1f} km/h"))
-        elif speed > 10:
-            orange_boxes.append((x_min, y_min, x_max, y_max))
-            running_labels.append((x_min, y_min, f"{int(object['tracker_id'])} - {speed:.1f} km/h"))
+        if speed > 10:
+            cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), speed_color, 4)
         else:
-            normal_boxes.append((x_min, y_min, x_max, y_max, color))
+            cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), color, 1) 
         
         ### add the bounding box area as text for debugging:
         current_bbox_area = (x_max - x_min) * (y_max - y_min)
@@ -391,6 +331,13 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
         player_text_xpos = int(x_min) + 10
         if object_placement == 'left':
             player_text_xpos = int(x_max) - 50
+        # put player id at foot position:
+        cv2.putText(overlay, f"{speed:.2f}km/h",(player_text_xpos,player_text_ypos+10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 0, 0),2)
+        
+        # add speed if player is running:
+        if speed is not None and speed > 10:
+            cv2.putText(overlay, f"{player_id}-{speed:.2f}km/h",(x_min,y_min-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,(0, 0, 0),2)  
+
         ### show the confidence of the prediction:
 
 
@@ -408,22 +355,6 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
     # Blend the overlay with the original frame using transparency
     alpha = 0.6  # Set the transparency level (0.0 to 1.0)
     cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)  # Blend the overlay with the original frame
-
-    # player boxes: ordinary play almost invisible; running boxes stand out (orange fairly, red fully opaque)
-    if normal_boxes:
-        faint = frame.copy()
-        for x0, y0, x1, y1, col in normal_boxes:
-            cv2.rectangle(faint, (x0, y0), (x1, y1), col, 1)
-        cv2.addWeighted(faint, BOX_ALPHA_NORMAL, frame, 1 - BOX_ALPHA_NORMAL, 0, frame)
-    if orange_boxes:
-        orange = frame.copy()
-        for x0, y0, x1, y1 in orange_boxes:
-            draw_corner_brackets(orange, x0, y0, x1, y1, (0, 165, 255), BOX_THICKNESS_RUNNING)
-        cv2.addWeighted(orange, BOX_ALPHA_ORANGE, frame, 1 - BOX_ALPHA_ORANGE, 0, frame)
-    for x0, y0, x1, y1 in red_boxes:
-        draw_corner_brackets(frame, x0, y0, x1, y1, (0, 0, 255), BOX_THICKNESS_RUNNING)
-    for lx, ly, text in running_labels:
-        draw_outlined_text(frame, text, (lx, max(18, ly - 10)))
 
 
     ######################### 2: Draw fully opaque elements directly on the frame: BALL AND POSESSION

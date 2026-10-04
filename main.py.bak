@@ -3,7 +3,6 @@ from video_annotator import CreateVideoAnnotated
 from reports import CreateStatisticsReport,CreateDetectionsReport
 from data import GetGameData
 from view_transformer import CreateViewTransformations
-from track_stitcher import TrackStitcher
 from speed_and_distance_db_updater import SpeedDistanceUpdater
 from posession_db_updater import BallPosessionUpdater
 from utils import *
@@ -20,10 +19,10 @@ def main():
 
     # def what to run: (manually adjust to suit )
     RUN_DETECTIONS = False       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
-    RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
+    RUN_TRANSFORMATIONS = True  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = False   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = True  # create annotated video
-    RUN_MATCH_REPORT_CREATOR = False  # create match report/statistics
+    RUN_MATCH_REPORT_CREATOR = True  # create match report/statistics
 
     # DETECTION SETTINGS FOR VIDEO:
     PITCH_DETECTION_OVERRIDE = True    # do we want to overide pitch detection and rather temp provide the vertices from our logger file instead ?
@@ -98,10 +97,6 @@ def main():
                                                        GAME_RECORD,
                                                        PITCH_DETECTION_OVERRIDE)
         db_transformations.run()
-        # one stable player_id per real player (repairs broken tracker ids, settles team labels)
-        db_track_stitcher = TrackStitcher(DATABASE_FILE,
-                                          GAME_RECORD)
-        db_track_stitcher.run()
         db_speed_distance = SpeedDistanceUpdater(DATABASE_FILE,
                                                  GAME_RECORD,
                                                  DURATION)

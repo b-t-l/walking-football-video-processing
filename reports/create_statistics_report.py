@@ -40,6 +40,15 @@ class CreateStatisticsReport:
 
     ###################################################################### FUNCTIONS:
 
+    ########################### WHICH COLUMN IDENTIFIES ONE PERSON: player_id (stitched) if present, else tracker_id
+    def person_id_column(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(detected_objects)")
+        columns = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        return "player_id" if "player_id" in columns else "tracker_id"
+
     ########################### FETCH DATA FROM DATABASE and create datasets used in each chart:
     def fetch_data(self):
         print("Fetching data from the database...")
@@ -50,7 +59,7 @@ class CreateStatisticsReport:
 
         # Query to fetch player data
         query = f'''
-        SELECT tracker_id, team, team_color, total_distance_metres, speed_km_per_hour, ball_posession, frame_id, x_transformed_metres, y_transformed_metres
+        SELECT {self.person_id_column()}, team, team_color, total_distance_metres, speed_km_per_hour, ball_posession, frame_id, x_transformed_metres, y_transformed_metres
         FROM detected_objects
         WHERE team IN ({', '.join('?' for _ in self.TEAM_NAMES)}) 
         AND team NOT IN ("Referee", "Goalkeeper") 
@@ -162,11 +171,12 @@ class CreateStatisticsReport:
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT tracker_id, team, total_distance_metres
+        id_column = self.person_id_column()
+        cursor.execute(f'''
+            SELECT {id_column}, team, total_distance_metres
             FROM detected_objects
             WHERE class_name = "player"
-            ORDER BY tracker_id, frame_id
+            ORDER BY {id_column}, frame_id, _id
         ''')
         rows = cursor.fetchall()
         conn.close()

@@ -32,10 +32,6 @@ for handler in moviepy_logger.handlers:
 
 class CreateVideoAnnotated:
 
-    # How far below the lowest calibrated pitch point (the near touchline) the black bottom panel starts, in
-    # pixels of the calibration image. Bigger = more margin under the pitch, smaller panel / overhead.
-    PANEL_CLEARANCE_PX = 40
-
     ######################## - INIT
     def __init__(self, 
                  DURATION, 
@@ -73,9 +69,6 @@ class CreateVideoAnnotated:
         #  is also what fitted_pitch_transformer.py fits the detections against, so the inset
         #  stays consistent with the database's x/y_transformed_metres. Falls back to the old
         #  hardcoded 46x21 for any game without a calibrator JSON yet.
-        self.PANEL_TOP_FRACTION = None   # None = legacy fixed bottom panel (no calibration available)
-        self.PITCH_OUTLINE_FRAC = None
-        self.TOP_MASK_FRAC = None
         calibrator_json = GAME_RECORD.get('pitch_calibrator_json') if hasattr(GAME_RECORD, 'get') else None
         if isinstance(calibrator_json, str) and calibrator_json.strip():
             pitch_dims = json.loads(calibrator_json)['pitch_dimensions_m']
@@ -86,33 +79,6 @@ class CreateVideoAnnotated:
             _fitted = FittedPitchTransformer(json.loads(calibrator_json), verbose=False)
             self.PITCH_OVERLAY = _fitted.overlay_geometry()
             self.FOOT_PIXEL_FN = _fitted.foot_pixel if _fitted.has_vertical_vp else None
-
-            # Bottom black panel starts just BELOW the lowest calibrated pitch point (the near touchline),
-            # so the whole pitch stays visible above it. Fraction of frame height; the calibration was done
-            # on image_size, so this also holds if the annotated video has a different resolution.
-            calibration = json.loads(calibrator_json)
-            lowest_y = []
-            def _collect_y(node):
-                if isinstance(node, dict):
-                    if 'x' in node and isinstance(node.get('y'), (int, float)):
-                        lowest_y.append(float(node['y']))
-                    for child in node.values():
-                        _collect_y(child)
-                elif isinstance(node, list):
-                    for child in node:
-                        _collect_y(child)
-            _collect_y(calibration.get('pitch_vertices'))
-            _collect_y(calibration.get('circle_points'))
-            image_height = float((calibration.get('image_size') or {}).get('h') or (calibration.get('image_size') or {}).get('height') or 1080)
-            if lowest_y:
-                self.PANEL_TOP_FRACTION = (max(lowest_y) + self.PANEL_CLEARANCE_PX) / image_height
-
-            # pitch boundary in the frame (as fractions) so the overhead can grow without covering the pitch
-            outline = _fitted.pitch_outline_pixels()
-            self.PITCH_OUTLINE_FRAC = [(float(x) / _fitted.img_w, float(y) / _fitted.img_h) for x, y in outline]
-            # netting edge clicked in the Pitch Calibrator (optional): everything above it is blacked out
-            self.TOP_MASK_FRAC = [(float(p['x']) / _fitted.img_w, float(p['y']) / _fitted.img_h)
-                                  for p in (calibration.get('top_mask_points') or []) if p and p.get('x') is not None]
         else:
             self.PITCH_LENGTH_M = 46.0
             self.PITCH_WIDTH_M = 21.0
@@ -193,13 +159,8 @@ class CreateVideoAnnotated:
     def get_frame_details_from_db(self,frame_number):
 
         # Fetch DETECTED OBJECTS for this frame:
-        # show the stitched player_id (from track_stitcher) where the database has one, else the raw tracker_id
-        if not hasattr(self, "_id_expression"):
-            self.cursor.execute("PRAGMA table_info(detected_objects)")
-            has_player_id = "player_id" in {row[1] for row in self.cursor.fetchall()}
-            self._id_expression = "COALESCE(player_id, tracker_id)" if has_player_id else "tracker_id"
-        self.cursor.execute(f'''
-            SELECT xmin, ymin, xmax, ymax, confidence, class_id, {self._id_expression}, class_name, 
+        self.cursor.execute('''
+            SELECT xmin, ymin, xmax, ymax, confidence, class_id, tracker_id, class_name, 
                 x_transformed_metres, y_transformed_metres, speed_km_per_hour, 
                 total_distance_metres, ball_posession, is_inside_pitch, team, team_color
             FROM detected_objects
@@ -372,10 +333,7 @@ class CreateVideoAnnotated:
                                 self.PITCH_LENGTH_M,
                                 self.PITCH_WIDTH_M,
                                 self.PITCH_OVERLAY,
-                                self.FOOT_PIXEL_FN,
-                                self.PANEL_TOP_FRACTION,
-                                self.PITCH_OUTLINE_FRAC,
-                                self.TOP_MASK_FRAC
+                                self.FOOT_PIXEL_FN
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy

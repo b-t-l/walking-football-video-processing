@@ -26,12 +26,8 @@ class SpeedDistanceUpdater:
 
     # --- tuning knobs ------------------------------------------------------------------------
     MAX_PLAUSIBLE_SPEED_KMH = 25.0   # faster than this between two detections of one track = glitch / ID swap...
-    MIN_JUMP_METRES = 3.0            # ...but only if the position also moved at least this far; smaller glitches are
-                                     #    handled by the robust fit instead of cutting the track
-    SPEED_GLITCH_CEILING_KMH = 25.0  # a fitted speed above this is a measurement glitch (e.g. a box that lost its feet) -> not measurable
-    ROBUST_ITERATIONS = 3            # re-weighting passes of the robust straight-line fit
-    ROBUST_MIN_SCALE_M = 0.15        # residuals smaller than this are never treated as outliers
-    ROBUST_TUKEY_C = 4.685           # standard Tukey biweight constant
+    MIN_JUMP_METRES = 0.8            # ...but only if the position also moved at least this far (ordinary one-frame
+                                     #    jitter can be 0.3 m = "25 km/h" over 1/24 s; a real glitch moves >0.8 m)
     SMOOTH_SIGMA_S = 0.25            # Gaussian weight width of the local straight-line fit (seconds)
     SMOOTH_HALF_WINDOW_S = 0.6       # only detections within +/- this many seconds are used (seconds)
     MIN_POINTS_IN_WINDOW = 4         # fewer detections than this in the window -> speed cannot be measured (0.0)
@@ -75,7 +71,7 @@ class SpeedDistanceUpdater:
 
     def _smooth_segment(self, t, x, y):
         """
-        Robust Gaussian-weighted local straight-line fit around every detection of one unbroken segment.
+        Gaussian-weighted local straight-line fit around every detection of one unbroken segment.
         Returns smoothed x, y (metres) and speed (km/h); NaN where fewer than MIN_POINTS_IN_WINDOW detections are in range.
         """
         n = len(t)
@@ -89,35 +85,19 @@ class SpeedDistanceUpdater:
             if b - a < self.MIN_POINTS_IN_WINDOW:
                 continue
             dt = t[a:b] - t[i]
-            xs, ys = x[a:b], y[a:b]
-            base_w = np.exp(-0.5 * (dt / self.SMOOTH_SIGMA_S) ** 2)
-            rob = np.ones_like(base_w)
-            fit = None
-            for _ in range(self.ROBUST_ITERATIONS):
-                w = base_w * rob
-                sw = w.sum()
-                if sw < 1e-9:
-                    fit = None
-                    break
-                mean_dt = (w * dt).sum() / sw
-                var_dt = (w * (dt - mean_dt) ** 2).sum()
-                if var_dt < 1e-12:
-                    fit = None
-                    break
-                mx = (w * xs).sum() / sw
-                my = (w * ys).sum() / sw
-                vx = (w * (dt - mean_dt) * (xs - mx)).sum() / var_dt
-                vy = (w * (dt - mean_dt) * (ys - my)).sum() / var_dt
-                fit = (mx - vx * mean_dt, my - vy * mean_dt, vx, vy)
-                # residual of every detection from the fitted line -> Tukey biweight for the next pass
-                res = np.hypot(xs - (fit[0] + vx * dt), ys - (fit[1] + vy * dt))
-                scale = max(self.ROBUST_MIN_SCALE_M, 1.4826 * float(np.median(res)))
-                u = res / (self.ROBUST_TUKEY_C * scale)
-                rob = np.where(u < 1.0, (1.0 - u ** 2) ** 2, 0.0)
-            if fit is None:
+            w = np.exp(-0.5 * (dt / self.SMOOTH_SIGMA_S) ** 2)
+            sw = w.sum()
+            mean_dt = (w * dt).sum() / sw
+            var_dt = (w * (dt - mean_dt) ** 2).sum()
+            if var_dt < 1e-12:
                 continue
-            sx[i], sy[i] = fit[0], fit[1]
-            speed[i] = math.hypot(fit[2], fit[3]) * 3.6
+            mx = (w * x[a:b]).sum() / sw
+            my = (w * y[a:b]).sum() / sw
+            vx = (w * (dt - mean_dt) * (x[a:b] - mx)).sum() / var_dt
+            vy = (w * (dt - mean_dt) * (y[a:b] - my)).sum() / var_dt
+            sx[i] = mx - vx * mean_dt   # fitted position at dt = 0
+            sy[i] = my - vy * mean_dt
+            speed[i] = math.hypot(vx, vy) * 3.6
         return sx, sy, speed
 
     ########## RUN THE SPEED/DISTANCE CALCULATOR:
@@ -126,15 +106,9 @@ class SpeedDistanceUpdater:
         start_time = time.time()  # Start the timer for overall process time
 
         """Fetch, calculate, and update database records in batches."""
-        # which column identifies one real person: the stitched player_id if track_stitcher has run
-        self.cursor.execute("PRAGMA table_info(detected_objects)")
-        columns = {row[1] for row in self.cursor.fetchall()}
-        id_column = "player_id" if "player_id" in columns else "tracker_id"
-        print(f"   one person = one {id_column}")
-
-        self.cursor.execute(f'''
-            SELECT DISTINCT {id_column} FROM detected_objects
-            WHERE class_name = "player" AND {id_column} IS NOT NULL
+        self.cursor.execute('''
+            SELECT DISTINCT tracker_id FROM detected_objects
+            WHERE class_name = "player"
         ''')
         tracker_ids = self.cursor.fetchall()
 
@@ -145,16 +119,15 @@ class SpeedDistanceUpdater:
             for tracker_id in tracker_ids:
                 tracker_id = tracker_id[0]
 
-                self.cursor.execute(f'''
-                        SELECT frame_id, x_transformed_metres, y_transformed_metres, is_inside_pitch, _id
+                self.cursor.execute('''
+                        SELECT frame_id, x_transformed_metres, y_transformed_metres, is_inside_pitch
                         FROM detected_objects
-                        WHERE {id_column} = ? AND class_name = "player"
-                        ORDER BY frame_id, _id
+                        WHERE tracker_id = ? AND class_name = "player"
+                        ORDER BY frame_id
                     ''', (tracker_id,))
                 records = self.cursor.fetchall()
 
                 frames = [r[0] for r in records]
-                row_ids = [r[4] for r in records]
                 speeds = [0.0] * len(records)
                 dist_inc = [0.0] * len(records)
 
@@ -174,7 +147,7 @@ class SpeedDistanceUpdater:
                         prev = None   # previous measurable smoothed point inside this segment
                         for k in range(b - a):
                             i = usable[a + k]
-                            if np.isnan(sp[k]) or sp[k] > self.SPEED_GLITCH_CEILING_KMH:
+                            if np.isnan(sp[k]):
                                 continue
                             inside = records[i][3] != 0
                             speeds[i] = float(sp[k]) if inside else 0.0
@@ -185,7 +158,7 @@ class SpeedDistanceUpdater:
                 accumulated_distance = 0.0
                 for i in range(len(records)):
                     accumulated_distance += dist_inc[i]
-                    updates_batch.append((speeds[i], accumulated_distance, row_ids[i]))
+                    updates_batch.append((speeds[i], accumulated_distance, frames[i], tracker_id))
 
                 if len(updates_batch) >= self.batch_size:
                     self._execute_batch_update(updates_batch)
@@ -196,7 +169,7 @@ class SpeedDistanceUpdater:
         if updates_batch:
             self._execute_batch_update(updates_batch)
 
-        print(f"   tracks split at absurd jumps (> {self.MIN_JUMP_METRES:.0f} m and > {self.MAX_PLAUSIBLE_SPEED_KMH:.0f} km/h between detections): {total_splits}")
+        print(f"   tracks split at implausible jumps (> {self.MAX_PLAUSIBLE_SPEED_KMH:.0f} km/h between detections): {total_splits}")
 
         self.conn.commit()
         self.cursor.close()
@@ -215,6 +188,6 @@ class SpeedDistanceUpdater:
         self.cursor.executemany('''
             UPDATE detected_objects
             SET speed_km_per_hour = ?, total_distance_metres = ?
-            WHERE _id = ?
+            WHERE frame_id = ? AND tracker_id = ? AND class_name = "player"
         ''', updates_batch)
         self.conn.commit()

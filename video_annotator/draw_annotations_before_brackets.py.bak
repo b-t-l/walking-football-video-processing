@@ -35,21 +35,6 @@ PITCH_LINE_ALPHA = 0.18         # pitch outline, lower = more transparent
 BOX_ALPHA_NORMAL = 0.12         # ordinary player box (team colour): barely there
 BOX_ALPHA_ORANGE = 0.75         # 10-15 km/h
 BOX_THICKNESS_RUNNING = 3       # red (>15 km/h) is fully opaque
-BRACKET_FRACTION = 0.28         # running boxes are corner brackets: each arm = this share of the box's shorter side
-BRACKET_MIN_PX, BRACKET_MAX_PX = 10, 34
-LABEL_FONT_SCALE = 0.6          # speed label shown only for running players
-
-def draw_corner_brackets(img, x0, y0, x1, y1, color, thickness):
-    arm = int(max(BRACKET_MIN_PX, min(BRACKET_MAX_PX, BRACKET_FRACTION * min(x1 - x0, y1 - y0))))
-    for cx, cy, dx, dy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
-        cv2.line(img, (cx, cy), (cx + dx * arm, cy), color, thickness, cv2.LINE_AA)
-        cv2.line(img, (cx, cy), (cx, cy + dy * arm), color, thickness, cv2.LINE_AA)
-
-def draw_outlined_text(img, text, org, scale=LABEL_FONT_SCALE):
-    # white text with a dark outline: readable on grass, shirts and sky alike
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 1, cv2.LINE_AA)
-
 
 def compute_bottom_layout(frame, panel_top_fraction, pitch_length_m, pitch_width_m, pitch_outline_frac=None):
     """
@@ -265,7 +250,7 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
     # Create an overlay for the object detections as we want all this dat to be slightly transparent.
     overlay = frame.copy()  # Create a copy of the frame for the overlay
 
-    normal_boxes, orange_boxes, red_boxes, running_labels = [], [], [], []
+    normal_boxes, orange_boxes, red_boxes = [], [], []
     # Draw the transformed points of players on the video:
     for object in data:
         
@@ -373,10 +358,8 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
         # (drawn after the main blend, each with its own opacity)
         if speed > 15:
             red_boxes.append((x_min, y_min, x_max, y_max))
-            running_labels.append((x_min, y_min, f"{int(object['tracker_id'])} - {speed:.1f} km/h"))
         elif speed > 10:
             orange_boxes.append((x_min, y_min, x_max, y_max))
-            running_labels.append((x_min, y_min, f"{int(object['tracker_id'])} - {speed:.1f} km/h"))
         else:
             normal_boxes.append((x_min, y_min, x_max, y_max, color))
         
@@ -391,6 +374,13 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
         player_text_xpos = int(x_min) + 10
         if object_placement == 'left':
             player_text_xpos = int(x_max) - 50
+        # put player id at foot position:
+        cv2.putText(overlay, f"{speed:.2f}km/h",(player_text_xpos,player_text_ypos+10),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 0, 0),2)
+        
+        # add speed if player is running:
+        if speed is not None and speed > 10:
+            cv2.putText(overlay, f"{player_id}-{speed:.2f}km/h",(x_min,y_min-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,(0, 0, 0),2)  
+
         ### show the confidence of the prediction:
 
 
@@ -418,12 +408,10 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
     if orange_boxes:
         orange = frame.copy()
         for x0, y0, x1, y1 in orange_boxes:
-            draw_corner_brackets(orange, x0, y0, x1, y1, (0, 165, 255), BOX_THICKNESS_RUNNING)
+            cv2.rectangle(orange, (x0, y0), (x1, y1), (0, 165, 255), BOX_THICKNESS_RUNNING)
         cv2.addWeighted(orange, BOX_ALPHA_ORANGE, frame, 1 - BOX_ALPHA_ORANGE, 0, frame)
     for x0, y0, x1, y1 in red_boxes:
-        draw_corner_brackets(frame, x0, y0, x1, y1, (0, 0, 255), BOX_THICKNESS_RUNNING)
-    for lx, ly, text in running_labels:
-        draw_outlined_text(frame, text, (lx, max(18, ly - 10)))
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 255), BOX_THICKNESS_RUNNING, cv2.LINE_AA)
 
 
     ######################### 2: Draw fully opaque elements directly on the frame: BALL AND POSESSION

@@ -397,28 +397,6 @@ class FittedPitchTransformer:
         scale = np.divide(rd, ru, out=np.ones_like(ru), where=ru > 1e-12)
         return q * scale[:, None]
 
-    def world_to_pixel(self, points):
-        """Inverse of transform_points: (N, 2) world metres -> (N, 2) pixels in the original frame."""
-        pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
-        h = self._h
-        H = np.array([[h[0], h[1], h[2]],
-                      [h[3], h[4], h[5]],
-                      [h[6], h[7], 1.0]])
-        homo = np.concatenate([pts, np.ones((len(pts), 1))], axis=1) @ np.linalg.inv(H).T
-        norm = homo[:, :2] / homo[:, 2:3]
-        d = self._distort(norm)
-        return np.stack([d[:, 0] * self._scale + self._cx, d[:, 1] * self._scale + self._cy], axis=1)
-
-    def pitch_outline_pixels(self, per_side=240):
-        """The pitch boundary (touchlines + goal lines) as a dense polyline of pixels in the original frame."""
-        L, W = self.length, self.width
-        corners = [(-L / 2, -W / 2), (L / 2, -W / 2), (L / 2, W / 2), (-L / 2, W / 2), (-L / 2, -W / 2)]
-        pts = []
-        for a, b in zip(corners[:-1], corners[1:]):
-            for t in np.linspace(0.0, 1.0, per_side, endpoint=False):
-                pts.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
-        return self.world_to_pixel(pts)
-
     def foot_pixel(self, xmin, ymin, xmax, ymax):
         """Pixel (x, y) in the original frame where transform_foot() puts the feet (for drawing)."""
         if self.vertical_vp is None:

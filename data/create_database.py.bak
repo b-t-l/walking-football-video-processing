@@ -221,15 +221,7 @@ class CreateDatabase:
         self.PLAYERS_TRACKER = YOLO(self.PLAYERS_MODEL_PATH)
         self.TEAM_TRACKER = YOLO(self.TEAM_MODEL_PATH)
 
-        #- ByteTrack: remember a player who disappears (hidden behind another player) for ~3 s instead of
-        #  the 1 s default, and tell it the real detection frame rate so that time is right. Whatever
-        #  ids still break are repaired afterwards by track_stitcher (player_id).
-        try:
-            self.BYTE_TRACKER = sv.ByteTrack(
-                lost_track_buffer=90,   # supervision scales this by frame_rate/30 -> 90 = 3 seconds at any frame rate
-                frame_rate=int(self.DETECTION_FPS))
-        except TypeError:
-            self.BYTE_TRACKER = sv.ByteTrack()   # older supervision with different argument names
+        self.BYTE_TRACKER = sv.ByteTrack()
         self.save_tracker_state()
 
         self.KEYPOINT_NAMES = [

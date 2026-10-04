@@ -74,8 +74,6 @@ class CreateVideoAnnotated:
         #  stays consistent with the database's x/y_transformed_metres. Falls back to the old
         #  hardcoded 46x21 for any game without a calibrator JSON yet.
         self.PANEL_TOP_FRACTION = None   # None = legacy fixed bottom panel (no calibration available)
-        self.PITCH_OUTLINE_FRAC = None
-        self.TOP_MASK_FRAC = None
         calibrator_json = GAME_RECORD.get('pitch_calibrator_json') if hasattr(GAME_RECORD, 'get') else None
         if isinstance(calibrator_json, str) and calibrator_json.strip():
             pitch_dims = json.loads(calibrator_json)['pitch_dimensions_m']
@@ -103,16 +101,9 @@ class CreateVideoAnnotated:
                         _collect_y(child)
             _collect_y(calibration.get('pitch_vertices'))
             _collect_y(calibration.get('circle_points'))
-            image_height = float((calibration.get('image_size') or {}).get('h') or (calibration.get('image_size') or {}).get('height') or 1080)
+            image_height = float((calibration.get('image_size') or {}).get('height') or 1080)
             if lowest_y:
                 self.PANEL_TOP_FRACTION = (max(lowest_y) + self.PANEL_CLEARANCE_PX) / image_height
-
-            # pitch boundary in the frame (as fractions) so the overhead can grow without covering the pitch
-            outline = _fitted.pitch_outline_pixels()
-            self.PITCH_OUTLINE_FRAC = [(float(x) / _fitted.img_w, float(y) / _fitted.img_h) for x, y in outline]
-            # netting edge clicked in the Pitch Calibrator (optional): everything above it is blacked out
-            self.TOP_MASK_FRAC = [(float(p['x']) / _fitted.img_w, float(p['y']) / _fitted.img_h)
-                                  for p in (calibration.get('top_mask_points') or []) if p and p.get('x') is not None]
         else:
             self.PITCH_LENGTH_M = 46.0
             self.PITCH_WIDTH_M = 21.0
@@ -373,9 +364,7 @@ class CreateVideoAnnotated:
                                 self.PITCH_WIDTH_M,
                                 self.PITCH_OVERLAY,
                                 self.FOOT_PIXEL_FN,
-                                self.PANEL_TOP_FRACTION,
-                                self.PITCH_OUTLINE_FRAC,
-                                self.TOP_MASK_FRAC
+                                self.PANEL_TOP_FRACTION
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy
