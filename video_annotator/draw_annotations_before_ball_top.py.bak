@@ -593,11 +593,10 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
         cv2.line(frame, start_point, end_point, (0, 255, 0), 2)  # Yellow lines for pitch edges
   
 
-    ball_positions = []
-    player_circle_radius = max(3, int(25 * scale * ui))   # defined up front: the ball is drawn after the loop, which may not run
     ## Draw the transformed points of players on the top view pitch:
     for object in data:
 
+        player_circle_radius = max(3, int(25 * scale * ui))
 
         # - draw the player:
         if object["x_transformed_metres"] and object["y_transformed_metres"]:
@@ -644,15 +643,10 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
                 #)
 
             
-            # the ball is collected here and drawn after every player, so it is never hidden under a player's dot
+            # draw a circle representing the ball
             if object['class_name'] == "ball":
-                ball_positions.append((map_position[0], final_position_y))
-
-    ball_radius = max(3, int(player_circle_radius * 0.55))
-    for bx, by in ball_positions:
-        cv2.circle(frame, (bx, by), ball_radius + max(2, int(3 * scale * ui)), (0, 0, 0), -1, cv2.LINE_AA)   # dark ring so it stands out on a player's dot
-        cv2.circle(frame, (bx, by), ball_radius, BALL_COLOR, -1, cv2.LINE_AA)
-
+                cv2.circle(frame, (map_position[0], final_position_y), max(2, player_circle_radius // 2), BALL_COLOR, -1) 
+                
     return frame
 
 
