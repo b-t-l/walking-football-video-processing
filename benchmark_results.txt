@@ -1,0 +1,11 @@
+
+SUMMARY  (5 frames, frames 240-244, torch 2.5.1, ultralytics 8.3.61)
+ms/frame = whole predict() call; speed-up is against the cpu reference; recall/precision/IoU compare with the reference detections
+
+configuration                 | player ms  x-faster  recall  prec.  IoU  
+-------------------------------------------------------------------------
+cpu @1920 (reference)         |    686.1     1.0x        -      -     -  
+mps @1792                     | FAILED: NotImplementedError: Output channels > 65536 not supported a
+
+reading it: recall below ~97% for the players, or any clear drop for the ball, means that setting changes the detections
+            (for the ball, compare the two 'n boxes' totals as well: the ball is rare and small)

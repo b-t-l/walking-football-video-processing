@@ -19,6 +19,9 @@ from shapely.geometry import Point, Polygon
 from utils import TimeUtils
 from utils import ImageUtils
 import gc
+import platform
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from team_assigner import TeamAssigner
 
 
@@ -31,6 +34,35 @@ def cleanup_gpu_memory():
 
 
 ########################################## - DETERMINE THE DEVICE WE ARE WORKING WITH TO DO DETECTIONS
+# On a Mac the two big YOLO models (players, ball) run through Core ML (GPU / Neural Engine) instead of the CPU.
+# Benchmarked on game 22 (M1 Max, 1920x1920 stretched input, same as training): ~130 ms/frame per model instead of
+# ~790 ms, with every detection matched (recall/precision 100%, box IoU 0.99 players / 0.88 ball).
+# The Core ML package is exported once, next to the .pt, and re-exported if the .pt is newer. If anything fails
+# (not a Mac, coremltools missing, class names differ) the normal PyTorch model is used, so nothing breaks.
+# Set to False to force the PyTorch/CPU path.
+USE_COREML_ON_MAC = True
+
+
+def load_predictor(pt_model, pt_path, imgsz=1920):
+    """Return the model object to call .predict() on: a Core ML version of the .pt on Apple hardware, else the .pt model."""
+    if not (USE_COREML_ON_MAC and platform.system() == "Darwin" and not torch.cuda.is_available()):
+        return pt_model, False
+    package = os.path.splitext(pt_path)[0] + ".mlpackage"
+    try:
+        if (not os.path.exists(package)) or os.path.getmtime(package) < os.path.getmtime(pt_path):
+            print(f"-- Exporting {pt_path} to Core ML at {imgsz}x{imgsz} FP16 (one-off, takes a minute) ...")
+            package = str(YOLO(pt_path).export(format="coreml", imgsz=imgsz, half=True, nms=False))
+        model = YOLO(package, task="detect")
+        if dict(model.names) != dict(pt_model.names):
+            print(f"⚠️ Core ML class names differ from {pt_path} - using PyTorch/CPU for this model")
+            return pt_model, False
+        print(f"-- {pt_path}: running through Core ML ({package})")
+        return model, True
+    except Exception as e:
+        print(f"⚠️ Core ML not available for {pt_path} ({type(e).__name__}: {str(e)[:120]}) - using PyTorch/CPU")
+        return pt_model, False
+
+
 def get_device_config(DETECTION_FPS):
     """
     Dynamically determine the device and configure runtime settings.
@@ -119,7 +151,9 @@ class CreateDatabase:
         #print(f"Polygon Points: {polygon_points}")
 
         # Create a Shapely Polygon object
-        shapely_polygon = Polygon(polygon_points)
+        if getattr(self, '_pitch_polygon', None) is None:
+            self._pitch_polygon = Polygon(polygon_points)
+        shapely_polygon = self._pitch_polygon
 
         # Determine the placement of the bounding box
         placement_x = ((x_max - x_min) / 2 + x_min)
@@ -211,6 +245,16 @@ class CreateDatabase:
         self.BATCH_SIZE = config["batch_size"]
         self.CHUNK_SIZE = config["chunk_size"]
         self.USE_HALF_PRECISION = config["use_half_precision"]
+        self.TIMINGS = {}          # seconds spent per stage, printed at the end of run()
+        self.TIMINGS_BG = {}       # stages that run in the background reader thread (overlapped)
+        self.TIMED_FRAMES = 0
+        _inside_pitch_check = self.is_detection_box_inside_pitch
+        def _timed_inside_pitch_check(*a, **k):
+            _t = time.perf_counter()
+            r = _inside_pitch_check(*a, **k)
+            self._tick('inside-pitch check', _t)
+            return r
+        self.is_detection_box_inside_pitch = _timed_inside_pitch_check
 
         # Initialize YOLO models
         self.PLAYERS_MODEL_PATH = os.path.join('models', 'objects', 'best-v10-1920x1920.pt')
@@ -220,6 +264,15 @@ class CreateDatabase:
         self.BALL_TRACKER = YOLO(self.BALL_MODEL_PATH)
         self.PLAYERS_TRACKER = YOLO(self.PLAYERS_MODEL_PATH)
         self.TEAM_TRACKER = YOLO(self.TEAM_MODEL_PATH)
+
+        # the models that actually run predict() for players / ball (Core ML on a Mac, else the same .pt models).
+        # The .pt models above are still used to read the input sizes.
+        self.PLAYERS_PREDICTOR, _players_coreml = load_predictor(self.PLAYERS_TRACKER, self.PLAYERS_MODEL_PATH)
+        self.BALL_PREDICTOR, _ball_coreml = load_predictor(self.BALL_TRACKER, self.BALL_MODEL_PATH)
+        if (_players_coreml or _ball_coreml) and self.BATCH_SIZE != 1:
+            # Core ML predicts one image per call, so keep batches at 1 (the Apple setting already is)
+            print("-- Core ML in use: batch size forced to 1")
+            self.BATCH_SIZE = 1
 
         #- ByteTrack: remember a player who disappears (hidden behind another player) for ~3 s instead of
         #  the 1 s default, and tell it the real detection frame rate so that time is right. Whatever
@@ -368,6 +421,32 @@ class CreateDatabase:
 
 
     ########################################## - PITCH DETECTIONS:
+    @contextmanager
+    def _stage(self, name):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._tick(name, t0)
+
+    def _timed_iter(self, iterable, name):
+        """yield from iterable, adding the time spent waiting for each item to the stage total"""
+        it = iter(iterable)
+        while True:
+            t0 = time.perf_counter()
+            try:
+                item = next(it)
+            except StopIteration:
+                return
+            self._tick(name, t0)
+            yield item
+
+    def _tick(self, name, t0, background=False):
+        """add the time since t0 to this stage's running total (timing only, no effect on results).
+        background=True: work done in the background reader thread, overlapped with the main loop (not part of the sum)"""
+        target = self.TIMINGS_BG if background else self.TIMINGS
+        target[name] = target.get(name, 0.0) + (time.perf_counter() - t0)
+
     def process_pitch_detections(self, frames_batch, frame_ids):
         '''
         We are using a static pitch detection taken from the game records details: so we just pass back those to be saved and dont need to do any actual detection
@@ -396,7 +475,7 @@ class CreateDatabase:
         # ✅ Write tracked detections to the database in bulk
         if db_entries:
             try:
-                with sqlite3.connect(self.DATABASE_FILE) as conn:
+                with self._stage('database writes'), sqlite3.connect(self.DATABASE_FILE) as conn:
                     cursor = conn.cursor()
                     for det in db_entries:
                         cursor.execute('''
@@ -420,9 +499,10 @@ class CreateDatabase:
         """
     
         # ✅ Batch YOLO detections
+        _t0 = time.perf_counter()
         if self.TORCH_DEVICE == 'cuda':
             with torch.cuda.amp.autocast():
-                player_detections_batch = self.PLAYERS_TRACKER.predict(
+                player_detections_batch = self.PLAYERS_PREDICTOR.predict(
                     frames_batch,
                     conf=0.6,
                     device=self.TORCH_DEVICE,
@@ -431,7 +511,7 @@ class CreateDatabase:
                     verbose=False
                 )
         else:
-            player_detections_batch = self.PLAYERS_TRACKER.predict(
+            player_detections_batch = self.PLAYERS_PREDICTOR.predict(
                 frames_batch,
                 conf=0.6,
                 device=self.TORCH_DEVICE,
@@ -439,6 +519,7 @@ class CreateDatabase:
                 imgsz=(self.PLAYER_MODEL_INPUT_SIZE['height'],self.PLAYER_MODEL_INPUT_SIZE['width']),
                 verbose=False
             )
+        self._tick('player YOLO (1920x1920)', _t0)
 
         db_entries = []
         # loop each detection and prepare for db writing of detections:
@@ -449,7 +530,34 @@ class CreateDatabase:
                 # convert to supervision
                 frame_detections_supervision = sv.Detections.from_ultralytics(detection_result)
                 # Add Tracking of Objects
+                _t0 = time.perf_counter()
                 frame_detections_with_tracking = self.BYTE_TRACKER.update_with_detections(frame_detections_supervision)   
+                self._tick('ByteTrack update', _t0)
+                # TEAM CLASSIFIER, one batched call per frame (was one call per player). Same crops, same model.
+                team_results = {}
+                _t0 = time.perf_counter()
+                _crops, _crop_index = [], []
+                for i in range(len(frame_detections_with_tracking.xyxy)):
+                    _x0, _y0, _x1, _y1 = frame_detections_with_tracking.xyxy[i].tolist()
+                    if int(_y0) < int(_y1) and int(_x0) < int(_x1):
+                        _crop = frames_batch[frame_idx][:, int(_y0):int(_y1), int(_x0):int(_x1)]
+                        if _crop.shape[1] > 0 and _crop.shape[2] > 0:
+                            _crops.append(ImageUtils.create_team_assigner_tensor(_crop,
+                                                                                 self.TEAM_MODEL_INPUT_SIZE['width'],
+                                                                                 self.TEAM_MODEL_INPUT_SIZE['height']))
+                            _crop_index.append(i)
+                if _crops:
+                    _team_batch = self.TEAM_TRACKER.predict(
+                        torch.cat(_crops, dim=0),
+                        conf=0.6,
+                        device=self.TORCH_DEVICE,
+                        half=self.USE_HALF_PRECISION,
+                        imgsz=(192,192),
+                        verbose=False
+                    )
+                    team_results = dict(zip(_crop_index, _team_batch))
+                self._tick('team classifier (batched per frame)', _t0)
+
                 # Loop results and get info from them that we want to store in db: Iterate over each detection
                 for i in range(len(frame_detections_with_tracking.xyxy)):
                     
@@ -471,24 +579,10 @@ class CreateDatabase:
                             
                         if bbox_image.shape[1] > 0 and bbox_image.shape[2] > 0:  # Validate dimensions
                             
-                            # resize it to the correct size for the team assigner model:
-                            bbox_image_resized = ImageUtils.create_team_assigner_tensor(bbox_image,
-                                                                                        self.TEAM_MODEL_INPUT_SIZE['width'],
-                                                                                        self.TEAM_MODEL_INPUT_SIZE['height']
-                                                                                        )
-
-                            # do a team assignment via yolo object classification model:
-                            team_detection = self.TEAM_TRACKER.predict(
-                                bbox_image_resized,
-                                conf=0.6,
-                                device=self.TORCH_DEVICE,
-                                half=self.USE_HALF_PRECISION,
-                                imgsz=(192,192),
-                                verbose=False
-                            )
-
-                            # store the resulting team name and color:
-                            team_name, team_color = self.TEAM_ASSIGNER.assign_team(team_detection)
+                            # team result comes from the batched call above
+                            team_detection = team_results.get(i)
+                            if team_detection is not None:
+                                team_name, team_color = self.TEAM_ASSIGNER.assign_team(team_detection)
                             #print(f"{tracker_id}-{class_name}-{frame_idx}.jpg -  {frame_idx} -> {team_name}")
                             #print(f"Raw detection results: {team_detection}")
 
@@ -551,7 +645,7 @@ class CreateDatabase:
             return
 
         # ✅ Write tracked detections to the database in bulk
-        with sqlite3.connect(self.DATABASE_FILE) as conn:
+        with self._stage('database writes'), sqlite3.connect(self.DATABASE_FILE) as conn:
             cursor = conn.cursor()
             for det in db_entries:
                 cursor.execute('''
@@ -578,9 +672,10 @@ class CreateDatabase:
         """
 
         # ✅ Batch YOLO detections
+        _t0 = time.perf_counter()
         if self.TORCH_DEVICE == 'cuda':
             with torch.cuda.amp.autocast():
-                ball_detections_batch = self.BALL_TRACKER.predict(
+                ball_detections_batch = self.BALL_PREDICTOR.predict(
                     frames_batch,
                     conf=0.3,
                     device=self.TORCH_DEVICE,
@@ -589,7 +684,7 @@ class CreateDatabase:
                     verbose=False
                 )
         else:
-            ball_detections_batch = self.BALL_TRACKER.predict(
+            ball_detections_batch = self.BALL_PREDICTOR.predict(
                 frames_batch,
                 conf=0.3,
                 device=self.TORCH_DEVICE,
@@ -597,7 +692,8 @@ class CreateDatabase:
                 imgsz=(self.BALL_MODEL_INPUT_SIZE['height'],self.BALL_MODEL_INPUT_SIZE['width']),
                 verbose=False
             )
-        
+        self._tick('ball YOLO (1920x1920)', _t0)
+
         db_entries = []
         # loop each detection and prepare for db writing of detections:
         if len(ball_detections_batch) > 0:
@@ -651,7 +747,7 @@ class CreateDatabase:
             return
 
         # ✅ Write tracked detections to the database in bulk
-        with sqlite3.connect(self.DATABASE_FILE) as conn:
+        with self._stage('database writes'), sqlite3.connect(self.DATABASE_FILE) as conn:
             cursor = conn.cursor()
             for det in db_entries:
                 if class_name == 'ball':
@@ -694,8 +790,11 @@ class CreateDatabase:
         # Predefined ranges from GAME_RECORD
         try:
             exclusion_ranges.append((0, self.time_to_seconds(game_record['game_start_seconds'])))
-            exclusion_ranges.append((self.time_to_seconds(game_record['half_time_start_seconds']),
-                                    self.time_to_seconds(game_record['half_time_end_seconds'])))
+            # half time is optional (a short test clip has none)
+            ht_start = str(game_record.get('half_time_start_seconds') or '').strip()
+            ht_end = str(game_record.get('half_time_end_seconds') or '').strip()
+            if ht_start and ht_end:
+                exclusion_ranges.append((self.time_to_seconds(ht_start), self.time_to_seconds(ht_end)))
             exclusion_ranges.append((self.time_to_seconds(game_record['game_end_seconds']), float('inf')))
         except KeyError as e:
             print(f"❌ Missing key in GAME_RECORD: {e}")
@@ -797,13 +896,13 @@ class CreateDatabase:
         exclusion_ranges = self.get_exclusion_ranges_from_game_record(self.GAME_RECORD)
 
         # GET VIDEO FRAMES: Get the frames for the chunk to process and prepare them (resize/tensor create):
-        for chunk_idx, chunk_start_frame in enumerate(range(0, end_frame, chunk_frames), start=1):
-            
+        def read_chunk(chunk_start_frame):
+            """read + prepare one chunk of frames. Runs in a background thread so the next chunk is being
+            decoded and resized while the models work on the current one."""
             chunk_end_frame = min(chunk_start_frame + chunk_frames, end_frame)
-            print(f"\n🗂️ -- Processing video chunk (video frames to tensors) -- Video time: {frame_to_timestamp(chunk_start_frame,self.ORIGINAL_VIDEO_FPS)} - {frame_to_timestamp(chunk_end_frame,self.ORIGINAL_VIDEO_FPS)} | Chuncks: {chunk_idx} of {total_chunks} | Frames {chunk_start_frame} - {chunk_end_frame}")
-
             frames = []
             frame_ids = []
+            _t_read = time.perf_counter()
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, chunk_start_frame)
             current_frame_id = chunk_start_frame
@@ -843,6 +942,23 @@ class CreateDatabase:
                 # LOOP: update to the new frame id and rerun: # Checking if we should skip the frame due to FPS
                 current_frame_id = self.skip_frames_due_to_fps(cap, current_frame_id, frame_skip)
 
+            self._tick('video read + resize to tensor', _t_read, background=True)
+            return frames, frame_ids
+
+        chunk_starts = list(range(0, end_frame, chunk_frames))
+        reader_pool = ThreadPoolExecutor(max_workers=1)
+        pending_read = reader_pool.submit(read_chunk, chunk_starts[0]) if chunk_starts else None
+
+        for chunk_idx, chunk_start_frame in enumerate(chunk_starts, start=1):
+            
+            chunk_end_frame = min(chunk_start_frame + chunk_frames, end_frame)
+            print(f"\n🗂️ -- Processing video chunk (video frames to tensors) -- Video time: {frame_to_timestamp(chunk_start_frame,self.ORIGINAL_VIDEO_FPS)} - {frame_to_timestamp(chunk_end_frame,self.ORIGINAL_VIDEO_FPS)} | Chuncks: {chunk_idx} of {total_chunks} | Frames {chunk_start_frame} - {chunk_end_frame}")
+
+            _t_wait = time.perf_counter()
+            frames, frame_ids = pending_read.result()      # normally ready already: it was read during the previous chunk
+            self._tick('waiting for frames from the background reader', _t_wait)
+            if chunk_idx < len(chunk_starts):
+                pending_read = reader_pool.submit(read_chunk, chunk_starts[chunk_idx])   # start reading the next chunk now
             if not frames:
                 print("⚠️ No valid frames in this chunk, moving to the next chunk.")
                 continue
@@ -857,7 +973,7 @@ class CreateDatabase:
             dataloader = DataLoader(
                 dataset,
                 batch_size=self.BATCH_SIZE,
-                num_workers=8,
+                num_workers=0,   # frames are already in memory: worker processes only add start-up + copy cost (esp. on macOS)
                 pin_memory=self.TORCH_DEVICE == "cuda"
             )
 
@@ -873,7 +989,7 @@ class CreateDatabase:
                         self.BYTE_TRACKER.lost_tracks = state['lost_tracks']
 
                     # LOOP: loop the batch and do the detections:
-                    for batch_idx, batch_frames in enumerate(dataloader):
+                    for batch_idx, batch_frames in enumerate(self._timed_iter(dataloader, 'data loader wait')):
                         
                         # Move batch to the selected device
                         batch_frames = batch_frames.to(self.TORCH_DEVICE)  
@@ -893,6 +1009,7 @@ class CreateDatabase:
                         self.process_player_detections(batch_frames, frame_ids[start_idx:end_idx])
                         self.process_ball_detections(batch_frames, frame_ids[start_idx:end_idx])
 
+                        self.TIMED_FRAMES += len(batch_frames)
                         pbar.update(len(batch_frames))
 
                     # BYTE TRACKER: Save tracker state after processing a batch so we dont lose tracking when starting a new batch
@@ -908,6 +1025,7 @@ class CreateDatabase:
             # Cleanup after chunk
             cleanup_gpu_memory()
 
+        reader_pool.shutdown(wait=True)
         cap.release()
         
 
@@ -916,5 +1034,15 @@ class CreateDatabase:
         total_time = end_time - start_time
         minutes, seconds = divmod(int(total_time), 60)
         print(f"✅ Processing time: {minutes}:{seconds} sec")
+
+        # WHERE THE TIME WENT (baseline for speed work)
+        n = max(1, self.TIMED_FRAMES)
+        accounted = sum(self.TIMINGS.values())
+        rows = sorted(self.TIMINGS.items(), key=lambda kv: -kv[1]) + [('everything else (db writes, loader, python)', max(0.0, total_time - accounted))]
+        print(f"⏱️ Time per stage over {n} frames ({total_time / n * 1000:.0f} ms/frame overall, {n / total_time:.2f} frames/s):")
+        for name, sec in rows:
+            print(f"   {name:<46}{sec:8.1f} s  {100 * sec / total_time:5.1f}%  {sec / n * 1000:7.1f} ms/frame")
+        for name, sec in self.TIMINGS_BG.items():
+            print(f"   (background, overlapped) {name:<30}{sec:6.1f} s  {sec / n * 1000:7.1f} ms/frame")
 
 

@@ -16,7 +16,7 @@ class TimeUtils:
     
     # Function to convert time string to total seconds
     def time_to_seconds_from_game_data(time_str):
-        if pd.isna(time_str):
+        if pd.isna(time_str) or not str(time_str).strip():
             return None
         parts = list(map(int, time_str.split(':')))
         if len(parts) == 2:  # MM:SS format

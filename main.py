@@ -19,7 +19,7 @@ def main():
     GAME_ID = 22     # what game (id column) to process ?
 
     # def what to run: (manually adjust to suit )
-    RUN_DETECTIONS = False       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
+    RUN_DETECTIONS = True       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
     RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = False   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = True  # create annotated video

@@ -1,4 +1,38 @@
+import datetime
 import pandas as pd
+
+TIME_FIELDS = ('game_start_seconds', 'half_time_start_seconds', 'half_time_end_seconds', 'game_end_seconds')
+
+
+def normalise_mmss(value):
+    """
+    Game-logger time cells are meant to be MM:SS (minutes:seconds into the video), but Excel quietly turns a typed
+    "01:00" into a TIME value (1:00 = 1 hour 0 min) and an empty cell arrives as NaN. Return a clean 'MM:SS' string,
+    or '' for an empty cell, so nothing downstream has to care how the cell was stored.
+    Excel's hours are read as minutes and its minutes as seconds (what was typed is what is meant).
+    Tip: formatting those cells as Text in Excel avoids the conversion altogether.
+    """
+    if value is None:
+        return ''
+    if isinstance(value, float) and pd.isna(value):
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, datetime.datetime):                  # e.g. 1900-01-02 14:30 when more than 24 'hours' were typed
+        total_min = int((value - datetime.datetime(1899, 12, 30)).total_seconds() // 3600)
+        seconds = value.minute
+    elif isinstance(value, datetime.time):
+        total_min, seconds = value.hour, value.minute
+    elif isinstance(value, datetime.timedelta):
+        total = int(value.total_seconds())
+        total_min, seconds = total // 3600, (total % 3600) // 60
+    elif isinstance(value, (int, float)):                     # Excel serial fraction of a day
+        total = int(round(float(value) * 86400))
+        total_min, seconds = total // 3600, (total % 3600) // 60
+    else:
+        return str(value).strip()
+    return f"{total_min:02d}:{seconds:02d}"
+
 
 ## - read the game data xls so we can get titles,duration,teams etc
 class GetGameData():
@@ -36,6 +70,12 @@ class GetGameData():
 
         # Find the first row where game_id is 0
         matching_record = next((row for row in data if row['game_id'] == self.GAME_ID), None)
+
+        # time cells -> clean 'MM:SS' strings ('' when empty)
+        if matching_record is not None:
+            for field in TIME_FIELDS:
+                if field in matching_record:
+                    matching_record[field] = normalise_mmss(matching_record[field])
 
         return matching_record
 
