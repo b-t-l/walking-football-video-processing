@@ -22,7 +22,7 @@ def main():
     RUN_DETECTIONS = True       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
     RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = False   # run report to check how performance of detections/transformation
-    RUN_ANNOTATION_VIDEO_CREATOR = True  # create annotated video
+    RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
     RUN_MATCH_REPORT_CREATOR = False  # create match report/statistics
 
     # DETECTION SETTINGS FOR VIDEO:

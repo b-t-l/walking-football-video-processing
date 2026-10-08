@@ -4,6 +4,7 @@ import sqlite3
 import torch
 import tqdm
 import time
+import logging
 import math
 import pickle
 import pandas as pd
@@ -40,7 +41,17 @@ def cleanup_gpu_memory():
 # The Core ML package is exported once, next to the .pt, and re-exported if the .pt is newer. If anything fails
 # (not a Mac, coremltools missing, class names differ) the normal PyTorch model is used, so nothing breaks.
 # Set to False to force the PyTorch/CPU path.
-USE_COREML_ON_MAC = True
+USE_COREML_ON_MAC = False
+
+# With a recent PyTorch (2.14+, checked on torch 2.14.1 / ultralytics 8.4.174) the Apple GPU (MPS) runs the 1920x1920
+# models directly: ~87 ms/frame instead of ~548 ms on CPU, with detections identical to the CPU run (IoU 1.00).
+# Older PyTorch (2.5) failed with "Output channels > 65536". A quick test run at start-up checks MPS really works
+# and falls back to the CPU if not. Core ML (above) is only used if USE_COREML_ON_MAC is switched on.
+USE_MPS_ON_MAC = True
+MPS_BATCH_SIZE = 1      # frames per predict() call on MPS. Raise (try 2, 4) once the baseline run works, and compare timings.
+MPS_HALF = True         # FP16 on the GPU: ~73 ms instead of 87 ms per model per frame. Benchmark (game 22): every box still found
+                        # (259/259 players, 21/21 ball); box overlap with the FP32 result IoU 0.98 players / 0.84 ball (sub-pixel shifts).
+MPS_TEAM_ON_GPU = True  # tiny 192x192 team classifier on the GPU too (False = CPU; test showed CPU 30 ms/frame)
 
 
 def load_predictor(pt_model, pt_path, imgsz=1920):
@@ -63,6 +74,18 @@ def load_predictor(pt_model, pt_path, imgsz=1920):
         return pt_model, False
 
 
+def mps_works(models_and_sizes, half=False):
+    """Run one blank frame through each model on the Apple GPU. True only if every model runs without error."""
+    try:
+        for model, imgsz in models_and_sizes:
+            blank = torch.zeros((1, 3, imgsz, imgsz), dtype=torch.float32)
+            model.predict(blank, device="mps", imgsz=(imgsz, imgsz), verbose=False, **({"half": True} if half else {}))
+        return True
+    except Exception as e:
+        print(f"⚠️ MPS (Apple GPU) test failed ({type(e).__name__}: {str(e)[:150]})")
+        return False
+
+
 def get_device_config(DETECTION_FPS):
     """
     Dynamically determine the device and configure runtime settings.
@@ -75,10 +98,10 @@ def get_device_config(DETECTION_FPS):
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         use_half_precision = False
     elif torch.backends.mps.is_available():
-        device = "cpu"  # m1 has a problem running :  Output channels > 65536 not supported at the MPS device
+        device = "mps" if USE_MPS_ON_MAC else "cpu"  # old PyTorch (<2.14) failed on MPS: "Output channels > 65536"; start-up check below falls back to cpu
         chunk_size = 1
-        batch_size = 1  # Smaller batch size for Apple M1 GPU - how many seconds of video to send to the batch before reseting
-        use_half_precision = False
+        batch_size = MPS_BATCH_SIZE if USE_MPS_ON_MAC else 1  # frames per predict() call
+        use_half_precision = bool(MPS_HALF and USE_MPS_ON_MAC)
     else:
         device = "cpu"
         chunk_size = 1  #  - how many seconds of video to send to the batch before reseting
@@ -269,6 +292,31 @@ class CreateDatabase:
         # The .pt models above are still used to read the input sizes.
         self.PLAYERS_PREDICTOR, _players_coreml = load_predictor(self.PLAYERS_TRACKER, self.PLAYERS_MODEL_PATH)
         self.BALL_PREDICTOR, _ball_coreml = load_predictor(self.BALL_TRACKER, self.BALL_MODEL_PATH)
+        if self.TORCH_DEVICE == "mps":
+            if mps_works([(self.PLAYERS_PREDICTOR, 1920), (self.BALL_PREDICTOR, 1920)], half=self.USE_HALF_PRECISION):
+                print(f"-- Detections running on the Apple GPU (MPS), batch size {self.BATCH_SIZE}")
+            elif self.USE_HALF_PRECISION and mps_works([(self.PLAYERS_PREDICTOR, 1920), (self.BALL_PREDICTOR, 1920)]):
+                print("-- FP16 failed on MPS: using FP32 on the Apple GPU instead")
+                self.USE_HALF_PRECISION = False
+            else:
+                print("-- Falling back to the CPU (slower)")
+                self.TORCH_DEVICE = "cpu"
+                self.BATCH_SIZE = 1
+                self.USE_HALF_PRECISION = False
+        # team classifier device (cpu unless MPS_TEAM_ON_GPU)
+        self.TEAM_DEVICE = self.TORCH_DEVICE if (self.TORCH_DEVICE != "mps" or MPS_TEAM_ON_GPU) else "cpu"
+        # ultralytics 8.4 warns about the 'half' argument, so only pass it when it is switched on
+        if self.TORCH_DEVICE != "cuda" and self.TORCH_DEVICE != "mps":
+            self.USE_HALF_PRECISION = False   # FP16 only on the GPUs
+        elif self.TORCH_DEVICE == "mps" and self.USE_HALF_PRECISION:
+            print("-- FP16 (half precision) on the Apple GPU")
+        self.HALF_KW = {"half": True} if self.USE_HALF_PRECISION else {}
+        if self.HALF_KW:
+            # ultralytics 8.4 logs "'half' is deprecated ... use 'quantize'" on every predict call (it still works): keep the log readable
+            class _NoHalfWarning(logging.Filter):
+                def filter(self, record):
+                    return "'half' is deprecated" not in record.getMessage()
+            logging.getLogger("ultralytics").addFilter(_NoHalfWarning())
         if (_players_coreml or _ball_coreml) and self.BATCH_SIZE != 1:
             # Core ML predicts one image per call, so keep batches at 1 (the Apple setting already is)
             print("-- Core ML in use: batch size forced to 1")
@@ -506,7 +554,7 @@ class CreateDatabase:
                     frames_batch,
                     conf=0.6,
                     device=self.TORCH_DEVICE,
-                    half=self.USE_HALF_PRECISION,
+                    **self.HALF_KW,
                     imgsz=(self.PLAYER_MODEL_INPUT_SIZE['height'],self.PLAYER_MODEL_INPUT_SIZE['width']),
                     verbose=False
                 )
@@ -515,7 +563,7 @@ class CreateDatabase:
                 frames_batch,
                 conf=0.6,
                 device=self.TORCH_DEVICE,
-                half=self.USE_HALF_PRECISION,
+                **self.HALF_KW,
                 imgsz=(self.PLAYER_MODEL_INPUT_SIZE['height'],self.PLAYER_MODEL_INPUT_SIZE['width']),
                 verbose=False
             )
@@ -550,8 +598,8 @@ class CreateDatabase:
                     _team_batch = self.TEAM_TRACKER.predict(
                         torch.cat(_crops, dim=0),
                         conf=0.6,
-                        device=self.TORCH_DEVICE,
-                        half=self.USE_HALF_PRECISION,
+                        device=self.TEAM_DEVICE,
+                        # (no half= here: the tiny team model was slower in FP16, 19.5 vs 11.7 ms/frame)
                         imgsz=(192,192),
                         verbose=False
                     )
@@ -679,7 +727,7 @@ class CreateDatabase:
                     frames_batch,
                     conf=0.3,
                     device=self.TORCH_DEVICE,
-                    half=self.USE_HALF_PRECISION,
+                    **self.HALF_KW,
                     imgsz=(self.BALL_MODEL_INPUT_SIZE['height'],self.BALL_MODEL_INPUT_SIZE['width']),
                     verbose=False
                 )
@@ -688,7 +736,7 @@ class CreateDatabase:
                 frames_batch,
                 conf=0.3,
                 device=self.TORCH_DEVICE,
-                half=self.USE_HALF_PRECISION,
+                **self.HALF_KW,
                 imgsz=(self.BALL_MODEL_INPUT_SIZE['height'],self.BALL_MODEL_INPUT_SIZE['width']),
                 verbose=False
             )
@@ -895,6 +943,17 @@ class CreateDatabase:
         # Load exclusion ranges from GAME_RECORD ( time we will be skipping from processing eg half time )
         exclusion_ranges = self.get_exclusion_ranges_from_game_record(self.GAME_RECORD)
 
+        # Stop reading at the game end: everything after it is excluded anyway, but the loop would still walk
+        # through (and decode) every remaining chunk of the video just to skip each frame.
+        try:
+            _game_end_frame = int(math.ceil(self.time_to_seconds(self.GAME_RECORD['game_end_seconds']) * original_fps))
+            if 0 < _game_end_frame < end_frame:
+                print(f"🏁 Game ends at frame {_game_end_frame}: not reading the {end_frame - _game_end_frame} frames after it")
+                end_frame = _game_end_frame
+                total_chunks = (end_frame + chunk_frames - 1) // chunk_frames
+        except Exception as e:
+            print(f"⚠️ Could not apply game end to the frame range ({type(e).__name__}: {e}) - reading to the end")
+
         # GET VIDEO FRAMES: Get the frames for the chunk to process and prepare them (resize/tensor create):
         def read_chunk(chunk_start_frame):
             """read + prepare one chunk of frames. Runs in a background thread so the next chunk is being
@@ -904,14 +963,23 @@ class CreateDatabase:
             frame_ids = []
             _t_read = time.perf_counter()
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, chunk_start_frame)
+            _t_seek = time.perf_counter()
+            # Seeking (cap.set) makes the decoder restart from the nearest key frame and decode forward, which can cost
+            # seconds. Chunks follow on from each other, so only seek when the reader is not already at the chunk start.
+            if reader_state['pos'] != chunk_start_frame:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, chunk_start_frame)
+            reader_state['pos'] = None     # unknown until this chunk has been read to its end
+            _seek_s, _decode_s, _convert_s = time.perf_counter() - _t_seek, 0.0, 0.0
             current_frame_id = chunk_start_frame
+            ret = True
 
             # loop thro each frome in the video in the chunk and skip where necessary due to detection fps or exclusion ranges:
             while current_frame_id < chunk_end_frame:
                 
                 #print(f"current_frame_id: {current_frame_id}")
+                _t_dec = time.perf_counter()
                 ret, frame = cap.read()
+                _decode_s += time.perf_counter() - _t_dec
                 
                 if not ret:
                     print(f"⚠️ Could not read frame {current_frame_id}, skipping...")
@@ -928,12 +996,14 @@ class CreateDatabase:
                     continue
                 
                 # TRANSFORM FRAME INTO TENSOR: process the frame to the correct size to match detection size:
+                _t_conv = time.perf_counter()
                 frame_tensor = ImageUtils.create_tensor_and_resize(frame,self.PLAYER_MODEL_INPUT_SIZE['width'],
                                              self.PLAYER_MODEL_INPUT_SIZE['height'],
                                              self.ORIGINAL_VIDEO_WIDTH,
                                              self.ORIGINAL_VIDEO_HEIGHT
                                              )
 
+                _convert_s += time.perf_counter() - _t_conv
                 # ADD TO ARRAY/DICT we will process for this chunck
                 frames.append(frame_tensor)
                 frame_ids.append(current_frame_id)
@@ -942,10 +1012,16 @@ class CreateDatabase:
                 # LOOP: update to the new frame id and rerun: # Checking if we should skip the frame due to FPS
                 current_frame_id = self.skip_frames_due_to_fps(cap, current_frame_id, frame_skip)
 
+            if ret:
+                reader_state['pos'] = current_frame_id   # the capture sits at the next unread frame = start of the next chunk
             self._tick('video read + resize to tensor', _t_read, background=True)
+            read_secs[chunk_start_frame] = (time.perf_counter() - _t_read, len(frames), _seek_s, _decode_s, _convert_s)
             return frames, frame_ids
 
         chunk_starts = list(range(0, end_frame, chunk_frames))
+        reader_state = {'pos': None}   # frame index the video capture is positioned at (None = unknown)
+        wait_lines = []  # one line per chunk, printed again at the end of the run
+        read_secs = {}   # chunk start frame -> (seconds the background read took, frames read)  [diagnostic]
         reader_pool = ThreadPoolExecutor(max_workers=1)
         pending_read = reader_pool.submit(read_chunk, chunk_starts[0]) if chunk_starts else None
 
@@ -957,6 +1033,11 @@ class CreateDatabase:
             _t_wait = time.perf_counter()
             frames, frame_ids = pending_read.result()      # normally ready already: it was read during the previous chunk
             self._tick('waiting for frames from the background reader', _t_wait)
+            _rs = read_secs.get(chunk_start_frame, (0, 0, 0, 0, 0))
+            _line = (f"chunk {chunk_idx:>3}: waited {time.perf_counter() - _t_wait:5.2f}s | background read {_rs[0]:5.2f}s for {_rs[1]} frames "
+                     f"(seek {_rs[2]:.2f}s, decode {_rs[3]:.2f}s, resize+tensor {_rs[4]:.2f}s)")
+            wait_lines.append(_line)
+            print("   ⏳ " + _line)
             if chunk_idx < len(chunk_starts):
                 pending_read = reader_pool.submit(read_chunk, chunk_starts[chunk_idx])   # start reading the next chunk now
             if not frames:
@@ -992,7 +1073,9 @@ class CreateDatabase:
                     for batch_idx, batch_frames in enumerate(self._timed_iter(dataloader, 'data loader wait')):
                         
                         # Move batch to the selected device
-                        batch_frames = batch_frames.to(self.TORCH_DEVICE)  
+                        # (CUDA only: on MPS the frames stay on the CPU - crops/pitch code use them as normal tensors,
+                        #  and ultralytics copies each batch to the GPU itself inside predict())
+                        batch_frames = batch_frames.to(self.TORCH_DEVICE if self.TORCH_DEVICE == "cuda" else "cpu")
                         if self.USE_HALF_PRECISION and self.TORCH_DEVICE == "cuda":
                             batch_frames = batch_frames.half()  # Use FP16 on CUDA if enabled
 
@@ -1025,6 +1108,9 @@ class CreateDatabase:
             # Cleanup after chunk
             cleanup_gpu_memory()
 
+        print("\n⏳ Background reader, per chunk (first 12 chunks):")
+        for _l in wait_lines[:12]:
+            print("   " + _l)
         reader_pool.shutdown(wait=True)
         cap.release()
         
