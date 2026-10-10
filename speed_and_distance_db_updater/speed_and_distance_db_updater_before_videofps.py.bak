@@ -60,9 +60,6 @@ class SpeedDistanceUpdater:
         ''', (self.GAME_RECORD['game_id'],))
         self.DB_GAME_DETAILS = self.cursor.fetchone()
         self.DETECTION_FPS = float(self.DB_GAME_DETAILS[4])
-        # frame_id is the frame number in the VIDEO, so seconds = frame_id / video fps (not the detection fps: with
-        # detections on every 2nd frame the two differ and speeds would come out wrong)
-        self.VIDEO_FPS = float(self.DB_GAME_DETAILS[3])
         self.duration = (0, DURATION * self.DETECTION_FPS)  # Store the duration filter
 
     ########## SMOOTHING HELPERS:
@@ -164,7 +161,7 @@ class SpeedDistanceUpdater:
                 # only detections with a usable position can be measured; the rest keep speed 0 / distance 0
                 usable = [i for i, r in enumerate(records) if r[1] is not None and r[2] is not None]
                 if usable:
-                    t = np.array([frames[i] for i in usable], dtype=float) / self.VIDEO_FPS
+                    t = np.array([frames[i] for i in usable], dtype=float) / self.DETECTION_FPS
                     x = np.array([records[i][1] for i in usable], dtype=float)
                     y = np.array([records[i][2] for i in usable], dtype=float)
 

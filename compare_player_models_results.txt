@@ -1,0 +1,25 @@
+
+SUMMARY  40 frames from frame 240, mps fp16, 1920x1920, conf 0.4, ultralytics 8.4.174
+
+weights            ms/frame  boxes avg conf   boxes by class
+v10 (current)          92.3    533     0.82   {'player': 479, 'goalkeeper': 24, 'referee': 30}
+yolo26 no-aug          69.0    435     0.76   {'player': 419, 'referee': 8, 'goalkeeper': 8}
+yolo26 with-aug        70.7    420     0.74   {'player': 417, 'referee': 3}
+
+AGREEMENT WITH v10 (IoU >= 0.5; not accuracy: v10 is not the truth)
+weights                  class ignored           same class required       frames with
+                   v10 found new in v10   IoU v10 found new in v10   IoU   other count
+yolo26 no-aug          79.5%      97.5%  0.86     78.0%      95.6%  0.86       37/40
+yolo26 with-aug        71.7%      91.0%  0.84     71.7%      91.0%  0.84       38/40
+
+v10 BOXES THE NEW WEIGHTS DID NOT FIND, by v10's class
+yolo26 no-aug     {'goalkeeper': 14, 'player': 65, 'referee': 30}
+yolo26 with-aug   {'player': 97, 'goalkeeper': 24, 'referee': 30}
+
+ON THE PITCH ONLY (boxes the pipeline would keep: foot point inside the pitch outline from game-id-22-Polis_vs_Aphrodite_Wanderers.db)
+weights             boxes   by class  |  vs v10: v10 found / new in v10 / same class: v10 found, IoU / frames with other count
+v10 (current)         445   {'player': 433, 'goalkeeper': 12}
+yolo26 no-aug         427   {'player': 419, 'referee': 8}  |   94.8% /  98.8% /  93.0%, IoU 0.86 / 20/40
+                          v10 boxes on the pitch that it did not find: {'player': 19, 'goalkeeper': 4}
+yolo26 with-aug       420   {'player': 417, 'referee': 3}  |   85.8% /  91.0% /  85.8%, IoU 0.84 / 24/40
+                          v10 boxes on the pitch that it did not find: {'player': 51, 'goalkeeper': 12}

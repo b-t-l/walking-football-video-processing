@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game logger</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/nav.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="gl-nav">
+  <a class="gl-brand" href="#/" title="All games"><img src="/static/logo.svg" alt=""><span>Game logger<small>Polis Walking Football</small></span></a>
+  <div class="gl-links" id="nav-links">
+    <a href="#/" data-nav="games">Games</a>
+    <a href="#/teams" data-nav="teams">Teams</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+  </div>
+  <div class="gl-context" id="nav-context" hidden>
+    <a class="gl-btn" href="#/" id="nav-back">&larr; All games</a>
+    <span class="gl-title" id="nav-title"></span>
+  </div>
+  <div class="gl-actions" id="nav-actions"></div>
+</header>
+<main id="view"></main>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

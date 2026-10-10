@@ -1,0 +1,170 @@
+"""
+compare_player_models.py  --  v10 (current) against the two new YOLO26 player weights, on real game footage.
+
+Run from the application folder (the one containing main.py), in the same python environment as main.py:
+
+    python compare_player_models.py                               # 40 frames of game 22, MPS + FP16 (the pipeline setting)
+    python compare_player_models.py --frames 100 --start-frame 2400
+    python compare_player_models.py --data /path/to/dataset/data.yaml    # ALSO score every weights file on the Roboflow TEST split
+
+What it prints, per weights file (v10 first, it is the reference):
+  * ms per frame (whole predict() call, MPS, FP16, 1920x1920 stretched square, conf 0.6 like the pipeline)
+  * boxes per frame by class (goalkeeper / player / referee) and the average confidence
+  * agreement with v10: share of v10's boxes the new model also finds (IoU >= 0.5), share of the new model's boxes that
+    v10 also has, once ignoring the class and once requiring the same class
+  * frames where the number of boxes differs from v10, and how many boxes are only in one of the two
+  * with --data: Ultralytics' own mAP50 / mAP50-95 / precision / recall on the test split, for all three weights
+
+Nothing here touches the database or the pipeline. Results are also saved to compare_player_models_results.txt.
+Note: 'agreement with v10' is NOT accuracy -- v10 is not the truth. Where they disagree, look at the frame (--save-diff).
+"""
+import os
+import argparse
+import time
+import traceback
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+import numpy as np
+
+from benchmark_detection_devices import load_raw_frames, to_tensor, compare_runs
+
+WEIGHTS = [
+    ("v10 (current)", os.path.join("models", "objects", "best-v10-1920x1920.pt")),
+    ("yolo26 no-aug", os.path.join("models", "objects", "yolo26-no-augementation.pt")),
+    ("yolo26 with-aug", os.path.join("models", "objects", "yolo26-with-augmentation.pt")),
+]
+CONF = 0.6
+
+
+def pick_device():
+    import torch
+    return ("mps", True) if torch.backends.mps.is_available() else ("cpu", False)
+
+
+def run(path, raw, imgsz, device, half, warmup):
+    import torch
+    from ultralytics import YOLO
+    model = YOLO(path)
+    names = model.names
+    tensors = [to_tensor(f, imgsz) for f in raw]
+    kw = dict(conf=CONF, device=device, imgsz=(imgsz, imgsz), verbose=False)
+    if half:
+        kw["half"] = True
+
+    def sync():
+        if device == "mps":
+            torch.mps.synchronize()
+
+    for _ in range(warmup):
+        model.predict(torch.stack(tensors[:1]), **kw)
+    sync()
+    times, dets = [], []
+    for t in tensors:
+        t0 = time.perf_counter()
+        r = model.predict(torch.stack([t]), **kw)[0]
+        sync()
+        times.append(time.perf_counter() - t0)
+        b = r.boxes
+        n = len(b)
+        dets.append(dict(
+            xyxy=(b.xyxy.cpu().numpy() / float(imgsz)) if n else np.zeros((0, 4)),
+            cls=b.cls.cpu().numpy().astype(int) if n else np.zeros((0,), dtype=int),
+            conf=b.conf.cpu().numpy() if n else np.zeros((0,)),
+        ))
+    return 1000.0 * float(np.mean(times)), dets, names
+
+
+def pct(x):
+    return "  n/a" if x is None else f"{100 * x:5.1f}%"
+
+
+def val_test_split(path, data_yaml, imgsz, device):
+    from ultralytics import YOLO
+    r = YOLO(path).val(data=data_yaml, split="test", imgsz=imgsz, device=device, conf=0.001, plots=False, verbose=False)
+    b = r.box
+    return dict(p=float(b.mp), r=float(b.mr), map50=float(b.map50), map=float(b.map))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--video", default=os.path.join("input_videos", "VID_20181002_211402_00_004.mp4"))
+    ap.add_argument("--start-frame", type=int, default=240)
+    ap.add_argument("--frames", type=int, default=40)
+    ap.add_argument("--imgsz", type=int, default=1920)
+    ap.add_argument("--warmup", type=int, default=3)
+    ap.add_argument("--data", default=None, help="data.yaml of the Roboflow export (YOLO format) to score on its test split")
+    args = ap.parse_args()
+
+    import torch
+    import ultralytics
+    device, half = pick_device()
+    print(f"torch {torch.__version__} | ultralytics {ultralytics.__version__} | device {device} | fp16 {half}")
+    raw = load_raw_frames(args.video, args.start_frame, args.frames)
+    print(f"read {len(raw)} frames from frame {args.start_frame}")
+
+    results, ref = [], None
+    for label, path in WEIGHTS:
+        print(f"\n=== {label}  ({path}) ===")
+        if not os.path.exists(path):
+            print("   missing, skipped")
+            continue
+        try:
+            ms, dets, names = run(path, raw, args.imgsz, device, half, args.warmup)
+        except Exception as e:
+            print(f"   FAILED: {type(e).__name__}: {str(e)[:200]}")
+            traceback.print_exc(limit=3)
+            continue
+        per_cls = {}
+        for d in dets:
+            for c in d["cls"]:
+                per_cls[names[int(c)]] = per_cls.get(names[int(c)], 0) + 1
+        confs = np.concatenate([d["conf"] for d in dets]) if dets else np.zeros(0)
+        row = dict(label=label, path=path, ms=ms, dets=dets, per_cls=per_cls,
+                   boxes=sum(len(d["cls"]) for d in dets), conf=float(confs.mean()) if len(confs) else None, names=names)
+        if ref is None:
+            ref = row
+        else:
+            row["any"] = compare_runs(ref["dets"], dets, class_aware=False)
+            row["cls"] = compare_runs(ref["dets"], dets, class_aware=True)
+            row["frames_diff"] = sum(len(a["cls"]) != len(b["cls"]) for a, b in zip(ref["dets"], dets))
+        print(f"   {ms:6.1f} ms/frame, {row['boxes']} boxes, by class {per_cls}")
+        results.append(row)
+
+    test_scores = {}
+    if args.data:
+        for label, path in WEIGHTS:
+            if os.path.exists(path):
+                try:
+                    test_scores[label] = val_test_split(path, args.data, args.imgsz, device)
+                    print(f"\ntest split {label}: {test_scores[label]}")
+                except Exception as e:
+                    print(f"\ntest split {label}: FAILED {type(e).__name__}: {str(e)[:200]}")
+
+    L = ["", f"SUMMARY  {len(raw)} frames from frame {args.start_frame}, {device}{' fp16' if half else ''}, "
+             f"{args.imgsz}x{args.imgsz}, conf {CONF}, ultralytics {ultralytics.__version__}", ""]
+    L.append(f"{'weights':<18}{'ms/frame':>9}{'boxes':>7}{'avg conf':>9}   boxes by class")
+    for r in results:
+        conf = "  n/a" if r["conf"] is None else f"{r['conf']:.2f}"
+        L.append(f"{r['label']:<18}{r['ms']:9.1f}{r['boxes']:7d}{conf:>9}   {r['per_cls']}")
+    L += ["", "AGREEMENT WITH v10 (IoU >= 0.5; not accuracy: v10 is not the truth)",
+          f"{'weights':<18}{'class ignored':^27}{'same class required':^27}{'frames with':>14}",
+          f"{'':<18}{'v10 found':>10}{'new in v10':>11}{'IoU':>6}{'v10 found':>10}{'new in v10':>11}{'IoU':>6}{'other count':>14}"]
+    for r in results[1:]:
+        a, c = r["any"], r["cls"]
+        iou = lambda x: "  n/a" if x["mean_iou"] is None else f"{x['mean_iou']:.2f}"
+        L.append(f"{r['label']:<18}{pct(a['recall']):>10}{pct(a['precision']):>11}{iou(a):>6}"
+                 f"{pct(c['recall']):>10}{pct(c['precision']):>11}{iou(c):>6}{r['frames_diff']:>9}/{len(raw)}")
+    if test_scores:
+        L += ["", "ROBOFLOW TEST SPLIT (Ultralytics val, conf 0.001)", f"{'weights':<18}{'P':>7}{'R':>7}{'mAP50':>8}{'mAP50-95':>10}"]
+        for k, s in test_scores.items():
+            L.append(f"{k:<18}{s['p']:7.3f}{s['r']:7.3f}{s['map50']:8.3f}{s['map']:10.3f}")
+    out = "\n".join(L)
+    print(out)
+    with open("compare_player_models_results.txt", "w") as fh:
+        fh.write(out + "\n")
+    print("\n(saved to compare_player_models_results.txt)")
+
+
+if __name__ == "__main__":
+    main()

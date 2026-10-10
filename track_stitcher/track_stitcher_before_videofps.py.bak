@@ -70,12 +70,8 @@ class TrackStitcher:
         self.GAME_RECORD = GAME_RECORD
         self.conn = sqlite3.connect(DATABASE_FILE)
         self.cursor = self.conn.cursor()
-        self.cursor.execute('SELECT video_fps, detection_fps FROM game WHERE game_id = ?', (GAME_RECORD['game_id'],))
-        _video_fps, _detection_fps = self.cursor.fetchone()
-        # frame_id is the frame number in the VIDEO: frames -> seconds uses the video fps (not the detection fps)
-        self.FPS = float(_video_fps)
-        # frames between two neighbouring detections (1 when every frame is detected, 2 at 12 fps on a 24 fps video)
-        self.FRAME_STRIDE = max(1.0, float(_video_fps) / float(_detection_fps))
+        self.cursor.execute('SELECT detection_fps FROM game WHERE game_id = ?', (GAME_RECORD['game_id'],))
+        self.FPS = float(self.cursor.fetchone()[0])
 
     ########## DATABASE PREPARATION:
     def _prepare_columns(self):
@@ -221,7 +217,7 @@ class TrackStitcher:
         d = self._shift_m(a['end_c'], a['end_h'], b['start_c'], b['start_h'])
         if gap_frames <= 0:
             # a short overlap = the same person reported twice for a frame or two (an id hand-over)
-            if gap_frames < -(self.LINK_MAX_OVERLAP_FRAMES * self.FRAME_STRIDE) or d > self.LINK_MAX_OVERLAP_DIST_M:
+            if gap_frames < -self.LINK_MAX_OVERLAP_FRAMES or d > self.LINK_MAX_OVERLAP_DIST_M:
                 return None
         gap_s = max(gap_frames, 0) / self.FPS
         if gap_s > self.LINK_MAX_GAP_S:
@@ -250,7 +246,7 @@ class TrackStitcher:
         max_gap_frames = self.LINK_MAX_GAP_S * self.FPS
         for i in range(n):
             # only fragments starting inside the allowed window after this one ends are candidates
-            cand = np.where((starts > ends[i] - (self.LINK_MAX_OVERLAP_FRAMES * self.FRAME_STRIDE) - 1) & (starts <= ends[i] + max_gap_frames))[0]
+            cand = np.where((starts > ends[i] - self.LINK_MAX_OVERLAP_FRAMES - 1) & (starts <= ends[i] + max_gap_frames))[0]
             for j in cand:
                 c = self._link_cost(fragments[i], fragments[j])
                 if c is not None and c <= self.MAX_LINK_COST:

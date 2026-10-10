@@ -37,18 +37,10 @@ def normalise_mmss(value):
 ## - read the game data xls so we can get titles,duration,teams etc
 class GetGameData():
 
-    def __init__(self, GAME_ID, GAME_DATA_FILE, source='excel'):
-        # source: 'excel'    = read games-logger.xlsx (the original way)
-        #         'database' = read the game logger app's database (game_logger/); gives the same record
-        if source not in ('excel', 'database'):
-            raise ValueError("source must be 'excel' or 'database'")
-        self.source = source
+    def __init__(self, GAME_ID, GAME_DATA_FILE):
 
         print("-------------------------------------------------")
-        if source == 'database':
-            print(f"Get game data: ID: {GAME_ID} from the game logger database")
-        else:
-            print(f"Get game data: ID: {GAME_ID} from file : {GAME_DATA_FILE}")
+        print(f"Get game data: ID: {GAME_ID} from file : {GAME_DATA_FILE}")
 
         self.GAME_DATA_FILE = GAME_DATA_FILE
         self.GAME_ID = GAME_ID
@@ -69,17 +61,6 @@ class GetGameData():
 
     ########################################## - GAME RECORD: read the excel file and get the row for the matching game_id
     def gameRecord(self):
-
-        if self.source == 'database':
-            from game_logger import db as _gl_db, record as _gl_record
-            _conn = _gl_db.connect()
-            try:
-                _rec = _gl_record.build_game_record(_conn, self.GAME_ID)
-            finally:
-                _conn.close()
-            if _rec is None:
-                raise ValueError(f"Game {self.GAME_ID} is not in the game logger database")
-            return _rec
 
         # Read the XLS file
         df = pd.read_excel(self.GAME_DATA_FILE)

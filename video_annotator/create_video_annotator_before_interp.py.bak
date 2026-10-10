@@ -14,7 +14,6 @@ import time
 import sqlite3
 import json
 from video_annotator import draw_annotations
-from video_annotator.frame_interpolation import FrameInterpolator
 from utils import *
 import torch
 import logging
@@ -30,12 +29,6 @@ moviepy_logger.setLevel(logging.WARNING)
 # Optionally, remove all handlers associated with the moviepy logger
 for handler in moviepy_logger.handlers:
     moviepy_logger.removeHandler(handler)
-
-# When detections ran on fewer frames than the video has (eg 12 detection fps on a 24 fps video), still draw the annotated
-# video at the full video frame rate: boxes / dots for the frames in between are placed half way between the detections
-# either side (picture only - the database and statistics are untouched). False = output at the detection fps instead.
-INTERPOLATE_TO_VIDEO_FPS = True
-
 
 class CreateVideoAnnotated:
 
@@ -143,10 +136,6 @@ class CreateVideoAnnotated:
         self.ORIGINAL_VIDEO_FPS = self.DB_GAME_DETAILS[3]
         self.CREATE_VIDEO_OUTPUT_FPS = self.DETECTION_FPS
 
-        # frames in between the detection frames get interpolated detections, so the video is drawn at the video fps
-        self.INTERPOLATE = bool(INTERPOLATE_TO_VIDEO_FPS and self.DETECTION_FPS < self.ORIGINAL_VIDEO_FPS)
-        self.OUTPUT_FPS = self.ORIGINAL_VIDEO_FPS if self.INTERPOLATE else self.DETECTION_FPS
-
         # Calculate start and end frames to process
         start_frame = int(self.START_TIME * self.ORIGINAL_VIDEO_FPS)
         end_frame = int(self.END_TIME * self.ORIGINAL_VIDEO_FPS)
@@ -186,13 +175,6 @@ class CreateVideoAnnotated:
         ''', (start_frame, end_frame))
             
         self.valid_frame_ids = [row[0] for row in self.cursor.fetchall()]
-        if self.INTERPOLATE:
-            # every frame that has detections (whole game, not only the requested range, so the edges blend properly)
-            self.cursor.execute('SELECT DISTINCT frame_id FROM detected_objects')
-            detection_frames = [row[0] for row in self.cursor.fetchall()]
-            stride = max(1, int(round(self.ORIGINAL_VIDEO_FPS / self.DETECTION_FPS)))
-            self.interpolator = FrameInterpolator(self.get_frame_details_from_db, detection_frames, max_gap=2 * stride)
-            print(f"🎞️ Detections every {stride} video frames ({self.DETECTION_FPS} fps): in-between frames interpolated, video drawn at {self.OUTPUT_FPS} fps")
         # Ensure all frames are included, even if no data
         all_frame_ids = list(range(start_frame, end_frame + 1))
         self.valid_frame_ids = sorted(set(self.valid_frame_ids + all_frame_ids))
@@ -301,7 +283,7 @@ class CreateVideoAnnotated:
         video = VideoFileClip(self.INPUT_VIDEO_TITLE)
         original_fps = video.fps
         print(f"✅ Original video FPS: {original_fps}")
-        print(f"✅ Target output FPS: {self.OUTPUT_FPS}")
+        print(f"✅ Target output FPS: {self.DETECTION_FPS}")
         print(f"✅ Device: {self.DEVICE} | Chunk size:{self.CHUNK_SIZE} | Annotation batch size: {self.ANNOTATIONS_BATCH_SIZE}")
 
         
@@ -325,13 +307,13 @@ class CreateVideoAnnotated:
         frame_ids = sorted(self.valid_frame_ids)
 
         # Calculate how many frames to skip to achieve DETECTION_FPS
-        frame_skip = 1 if self.INTERPOLATE else int(self.ORIGINAL_VIDEO_FPS / self.DETECTION_FPS)
+        frame_skip = int(self.ORIGINAL_VIDEO_FPS / self.DETECTION_FPS)
 
         # Filter frame_ids to match DETECTION_FPS
         frame_ids = frame_ids[::frame_skip]
 
         # Calculate frames per chunk for 15 seconds using DETECTION_FPS
-        frames_per_chunk = int(15 * self.OUTPUT_FPS)
+        frames_per_chunk = int(15 * self.DETECTION_FPS)
 
         # Calculate total chunks based on frames_per_chunk
         total_chunks = (len(frame_ids) + frames_per_chunk - 1) // frames_per_chunk
@@ -362,10 +344,7 @@ class CreateVideoAnnotated:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 
                 # Get DB data
-                if self.INTERPOLATE:
-                    db_objects, db_pitch = self.interpolator.get(frame_id)
-                else:
-                    db_objects, db_pitch = self.get_frame_details_from_db(frame_id)
+                db_objects, db_pitch = self.get_frame_details_from_db(frame_id)
 
                 # Add to batch
                 batch_frames.append(frame)
@@ -405,13 +384,13 @@ class CreateVideoAnnotated:
                     
                         # Add annotated frames to clips
                         for annotated_frame in annotated_frames:
-                            clips.append(VideoClip(lambda t, f=annotated_frame: f, duration=1.0/self.OUTPUT_FPS))
+                            clips.append(VideoClip(lambda t, f=annotated_frame: f, duration=1.0/self.DETECTION_FPS))
                     else:
                         # add empty frames as no objects found in the db
                         print(f"🔄 -- Adding empty frames as no objects found in the db")
                         for frame in batch_frames:
                             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            clips.append(VideoClip(lambda t, f=frame_rgb: f, duration=1.0/self.OUTPUT_FPS))
+                            clips.append(VideoClip(lambda t, f=frame_rgb: f, duration=1.0/self.DETECTION_FPS))
                     
                     # Clear batches after processing
                     batch_frames.clear()
@@ -432,7 +411,7 @@ class CreateVideoAnnotated:
                 if torch.backends.mps.is_available():
                     chunk_clip.write_videofile(
                         chunk_path,
-                        fps=self.OUTPUT_FPS,
+                        fps=self.DETECTION_FPS,
                         codec='h264_videotoolbox',
                         audio=False,
                         threads=4,
@@ -442,7 +421,7 @@ class CreateVideoAnnotated:
                 else:
                     chunk_clip.write_videofile(
                         chunk_path,
-                        fps=self.OUTPUT_FPS,
+                        fps=self.DETECTION_FPS,
                         audio=False,
                         threads=4,
                         preset='fast',

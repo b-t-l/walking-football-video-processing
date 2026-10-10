@@ -1,0 +1,84 @@
+"""The pitch calibrator page and the video-frame endpoint it uses."""
+import os
+import shutil
+import subprocess
+import urllib.parse
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, Response
+
+from . import db, repo
+
+router = APIRouter()
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def _get_conn():
+    conn = db.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _ffmpeg():
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def extract_frame_jpeg(video_path, seconds):
+    """One full-resolution JPEG frame at `seconds`. ffmpeg when available, otherwise OpenCV (which the pipeline already uses)."""
+    problem = ""
+    ff = _ffmpeg()
+    if ff:
+        try:
+            p = subprocess.run([ff, "-v", "error", "-ss", f"{seconds:.3f}", "-i", video_path, "-frames:v", "1", "-q:v", "2",
+                                "-f", "image2pipe", "-vcodec", "mjpeg", "-"], capture_output=True, timeout=90)
+            if p.returncode == 0 and p.stdout:
+                return p.stdout
+            problem = p.stderr.decode("utf-8", "replace")[-300:]
+        except subprocess.TimeoutExpired:
+            problem = "ffmpeg took too long"
+    try:
+        import cv2
+    except ImportError:
+        raise HTTPException(500, f"Could not read the video ({problem or 'ffmpeg is not installed'}) and OpenCV is not available either.")
+    cap = cv2.VideoCapture(video_path)
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000.0)
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise HTTPException(422, "No frame could be read at that time - it may be beyond the end of the video. " + problem)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not ok:
+        raise HTTPException(500, "Could not encode the frame")
+    return buf.tobytes()
+
+
+@router.get("/api/games/{game_id}/frame")
+def game_frame(game_id: int, t: float = 5.0, conn=Depends(_get_conn)):
+    g = repo.get_game(conn, game_id, with_detail=False)
+    if g is None:
+        raise HTTPException(404, f"Game {game_id} does not exist")
+    if not g["source_video"]:
+        raise HTTPException(422, "This game has no source video yet - choose one on the game page first")
+    path = repo.resolve_video_path(g["source_video"])
+    if not os.path.exists(path):
+        raise HTTPException(422, f"The video file was not found at {path}")
+    t = max(0.0, t)
+    data = extract_frame_jpeg(path, t)
+    label = f"{os.path.basename(path)} @ {int(t) if float(t).is_integer() else round(t, 1)}s"
+    return Response(data, media_type="image/jpeg",
+                    headers={"X-Frame-Label": urllib.parse.quote(label), "Cache-Control": "no-store"})
+
+
+@router.get("/calibrator")
+def calibrator_page():
+    return FileResponse(os.path.join(STATIC_DIR, "calibrator.html"), headers={"Cache-Control": "no-store"})

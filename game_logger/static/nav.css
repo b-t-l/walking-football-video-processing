@@ -1,0 +1,27 @@
+/* Shared navigation bar (games app and pitch calibrator). Always dark so the yellow logo reads clearly. */
+.gl-nav { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px 16px; padding: 0 20px; min-height: 60px;
+  background: #14201a; color: #f3f1e8; border-bottom: 3px solid #feca02; flex-wrap: wrap; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.gl-brand { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; padding: 6px 0; flex: none; }
+.gl-brand img { height: 40px; width: auto; display: block; }
+.gl-brand span { font-weight: 700; font-size: 16px; line-height: 1.1; }
+.gl-brand small { display: block; font-weight: 400; font-size: 11px; color: #b9c4bb; margin-top: 2px; }
+.gl-links { display: flex; gap: 4px; margin-left: 12px; }
+.gl-links a { color: #c9d3cb; text-decoration: none; padding: 7px 13px; border-radius: 6px; }
+.gl-links a:hover { color: #fff; }
+.gl-links a.active { background: rgba(254, 202, 2, .16); color: #feca02; font-weight: 600; }
+.gl-links[hidden], .gl-context[hidden] { display: none; }
+.gl-context { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 220px; margin-left: 8px; }
+.gl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 15px; }
+.gl-spacer { flex: 1; }
+.gl-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+.gl-btn { font: inherit; font-size: 14px; border: 1px solid rgba(255, 255, 255, .28); background: transparent; color: #f3f1e8; border-radius: 6px;
+  padding: 6px 13px; cursor: pointer; text-decoration: none; display: inline-block; white-space: nowrap; }
+.gl-btn:hover { border-color: #feca02; color: #fff; }
+.gl-btn:focus-visible, .gl-input:focus-visible, .gl-brand:focus-visible { outline: 2px solid #feca02; outline-offset: 2px; }
+.gl-btn.primary { background: #feca02; border-color: #feca02; color: #14201a; font-weight: 700; }
+.gl-btn.primary:hover { background: #ffd733; color: #14201a; }
+.gl-btn.danger { color: #ff9d90; }
+.gl-btn:disabled { opacity: .5; cursor: default; }
+.gl-note { font-size: 12px; color: #feca02; }
+.gl-input { font: inherit; font-size: 14px; padding: 6px 9px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .28); background: rgba(255, 255, 255, .08); color: #fff; width: 14em; }
+.gl-input::placeholder { color: #9fada3; }

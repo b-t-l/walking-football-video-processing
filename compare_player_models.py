@@ -1,0 +1,300 @@
+"""
+compare_player_models.py  --  v10 (current) against the two new YOLO26 player weights, on real game footage.
+
+Run from the application folder (the one containing main.py), in the same python environment as main.py:
+
+    python compare_player_models.py                               # 40 frames of game 22, MPS + FP16 (the pipeline setting)
+    python compare_player_models.py --frames 100 --start-frame 2400
+    python compare_player_models.py --conf 0.4 --save-diff diff_pictures   # lower threshold + pictures of the differences
+    python compare_player_models.py --data /path/to/dataset/data.yaml    # ALSO score every weights file on the Roboflow TEST split
+
+What it prints, per weights file (v10 first, it is the reference):
+  * ms per frame (whole predict() call, MPS, FP16, 1920x1920 stretched square, conf 0.6 like the pipeline)
+  * boxes per frame by class (goalkeeper / player / referee) and the average confidence
+  * agreement with v10: share of v10's boxes the new model also finds (IoU >= 0.5), share of the new model's boxes that
+    v10 also has, once ignoring the class and once requiring the same class
+  * frames where the number of boxes differs from v10, and how many boxes are only in one of the two
+  * with --data: Ultralytics' own mAP50 / mAP50-95 / precision / recall on the test split, for all three weights
+
+Nothing here touches the database or the pipeline. Results are also saved to compare_player_models_results.txt.
+Note: 'agreement with v10' is NOT accuracy -- v10 is not the truth. Where they disagree, look at the frame (--save-diff).
+"""
+import os
+import argparse
+import time
+import traceback
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+import numpy as np
+
+from benchmark_detection_devices import load_raw_frames, to_tensor, compare_runs
+
+WEIGHTS = [
+    ("v10 (current)", os.path.join("models", "objects", "best-v10-1920x1920.pt")),
+    ("yolo26 no-aug", os.path.join("models", "objects", "yolo26-no-augementation.pt")),
+    ("yolo26 with-aug", os.path.join("models", "objects", "yolo26-with-augmentation.pt")),
+]
+CONF = 0.6
+
+
+def pick_device():
+    import torch
+    return ("mps", True) if torch.backends.mps.is_available() else ("cpu", False)
+
+
+def run(path, raw, imgsz, device, half, warmup, conf=CONF):
+    import torch
+    from ultralytics import YOLO
+    model = YOLO(path)
+    names = model.names
+    tensors = [to_tensor(f, imgsz) for f in raw]
+    kw = dict(conf=conf, device=device, imgsz=(imgsz, imgsz), verbose=False)
+    if half:
+        kw["half"] = True
+
+    def sync():
+        if device == "mps":
+            torch.mps.synchronize()
+
+    for _ in range(warmup):
+        model.predict(torch.stack(tensors[:1]), **kw)
+    sync()
+    times, dets = [], []
+    for t in tensors:
+        t0 = time.perf_counter()
+        r = model.predict(torch.stack([t]), **kw)[0]
+        sync()
+        times.append(time.perf_counter() - t0)
+        b = r.boxes
+        n = len(b)
+        dets.append(dict(
+            xyxy=(b.xyxy.cpu().numpy() / float(imgsz)) if n else np.zeros((0, 4)),
+            cls=b.cls.cpu().numpy().astype(int) if n else np.zeros((0,), dtype=int),
+            conf=b.conf.cpu().numpy() if n else np.zeros((0,)),
+        ))
+    return 1000.0 * float(np.mean(times)), dets, names
+
+
+def pct(x):
+    return "  n/a" if x is None else f"{100 * x:5.1f}%"
+
+
+def match_any(ref_xyxy, new_xyxy, thr=0.5):
+    """class-ignoring greedy matching -> (set of matched ref idx, set of matched new idx)"""
+    from benchmark_detection_devices import iou_matrix
+    if len(ref_xyxy) == 0 or len(new_xyxy) == 0:
+        return set(), set()
+    m = iou_matrix(ref_xyxy, new_xyxy)
+    pairs = sorted(((m[i, j], i, j) for i in range(m.shape[0]) for j in range(m.shape[1]) if m[i, j] >= thr), reverse=True)
+    ur, un = set(), set()
+    for _, i, j in pairs:
+        if i in ur or j in un:
+            continue
+        ur.add(i)
+        un.add(j)
+    return ur, un
+
+
+def missed_by_class(ref, new, ref_names):
+    out = {}
+    for a, b in zip(ref["dets"], new["dets"]):
+        ur, _ = match_any(a["xyxy"], b["xyxy"])
+        for i, c in enumerate(a["cls"]):
+            if i not in ur:
+                n = ref_names[int(c)]
+                out[n] = out.get(n, 0) + 1
+    return out
+
+
+def save_diff_frames(raw, ref, new, outdir, label, max_frames=8):
+    """green = both found it, red = v10 only (new model missed it), blue = new model only. Saves the frames with most differences."""
+    import cv2
+    os.makedirs(outdir, exist_ok=True)
+    scored = []
+    for k, (a, b) in enumerate(zip(ref["dets"], new["dets"])):
+        ur, un = match_any(a["xyxy"], b["xyxy"])
+        scored.append((len(a["cls"]) - len(ur) + len(b["cls"]) - len(un), k, ur, un))
+    scored.sort(reverse=True)
+    for diff, k, ur, un in scored[:max_frames]:
+        if diff == 0:
+            break
+        img = cv2.cvtColor(raw[k], cv2.COLOR_RGB2BGR)
+        h, w = img.shape[:2]
+        a, b = ref["dets"][k], new["dets"][k]
+
+        def box(xyxy):
+            return int(xyxy[0] * w), int(xyxy[1] * h), int(xyxy[2] * w), int(xyxy[3] * h)
+        for i, xy in enumerate(a["xyxy"]):
+            x1, y1, x2, y2 = box(xy)
+            col = (0, 200, 0) if i in ur else (0, 0, 255)
+            cv2.rectangle(img, (x1, y1), (x2, y2), col, 2)
+            if i not in ur:
+                cv2.putText(img, f"{ref['names'][int(a['cls'][i])]} {a['conf'][i]:.2f}", (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+        for j, xy in enumerate(b["xyxy"]):
+            if j not in un:
+                x1, y1, x2, y2 = box(xy)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 120, 0), 2)
+                cv2.putText(img, f"{new['names'][int(b['cls'][j])]} {b['conf'][j]:.2f}", (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 120, 0), 1)
+        name = f"{label.replace(' ', '_')}_frame{k:03d}.jpg"
+        cv2.imwrite(os.path.join(outdir, name), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    print(f"   saved difference pictures to {outdir}")
+
+
+DEFAULT_DB = os.path.join("..", "output", "game-id-22-Polis_vs_Aphrodite_Wanderers.db")
+
+
+def load_pitch_polygon(db_path):
+    """the pitch outline the pipeline saved for the game (video pixels), in the order it was given"""
+    import sqlite3
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    first = con.execute("select min(frame_id) from detected_pitch").fetchone()[0]
+    pts = con.execute("select x, y from detected_pitch where frame_id=? order by rowid", (first,)).fetchall()
+    con.close()
+    return [(float(x), float(y)) for x, y in pts]
+
+
+def inside_pitch_mask(dets, polygon, w, h):
+    """same test as create_database.is_detection_box_inside_pitch: the foot point of the box touches the pitch outline"""
+    from shapely.geometry import Point, Polygon
+    poly = Polygon(polygon)
+    keep = []
+    for xyxy in dets["xyxy"]:
+        x1, y1, x2, y2 = xyxy[0] * w, xyxy[1] * h, xyxy[2] * w, xyxy[3] * h
+        cx, cy = (x2 - x1) / 2 + x1, (y2 - y1) / 2 + y1
+        cross = (1927 - 1927) * (cy - 236) - (1110 - 236) * (cx - 1927)      # same fixed centre line as the pipeline
+        px = x2 if cross > 0 else (x1 if cross < 0 else (x1 + x2) / 2)
+        keep.append(poly.intersects(Point(float(px), float(y2))))
+    return np.array(keep, dtype=bool) if keep else np.zeros(0, dtype=bool)
+
+
+def filter_dets(dets, mask):
+    return dict(xyxy=dets["xyxy"][mask], cls=dets["cls"][mask], conf=dets["conf"][mask])
+
+
+def val_test_split(path, data_yaml, imgsz, device):
+    from ultralytics import YOLO
+    r = YOLO(path).val(data=data_yaml, split="test", imgsz=imgsz, device=device, conf=0.001, plots=False, verbose=False)
+    b = r.box
+    return dict(p=float(b.mp), r=float(b.mr), map50=float(b.map50), map=float(b.map))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--video", default=os.path.join("input_videos", "VID_20181002_211402_00_004.mp4"))
+    ap.add_argument("--start-frame", type=int, default=240)
+    ap.add_argument("--frames", type=int, default=40)
+    ap.add_argument("--imgsz", type=int, default=1920)
+    ap.add_argument("--warmup", type=int, default=3)
+    ap.add_argument("--data", default=None, help="data.yaml of the Roboflow export (YOLO format) to score on its test split")
+    ap.add_argument("--conf", type=float, default=CONF, help="confidence threshold for ALL weights (default 0.6 = the pipeline)")
+    ap.add_argument("--save-diff", default=None, metavar="DIR", help="save pictures of the frames where the new weights differ most from v10 (green both, red v10 only, blue new only)")
+    ap.add_argument("--pitch-db", default=DEFAULT_DB, help="game database to take the pitch outline from, for the pitch-only table")
+    args = ap.parse_args()
+
+    import torch
+    import ultralytics
+    device, half = pick_device()
+    print(f"torch {torch.__version__} | ultralytics {ultralytics.__version__} | device {device} | fp16 {half}")
+    raw = load_raw_frames(args.video, args.start_frame, args.frames)
+    print(f"read {len(raw)} frames from frame {args.start_frame}")
+
+    results, ref = [], None
+    for label, path in WEIGHTS:
+        print(f"\n=== {label}  ({path}) ===")
+        if not os.path.exists(path):
+            print("   missing, skipped")
+            continue
+        try:
+            ms, dets, names = run(path, raw, args.imgsz, device, half, args.warmup, args.conf)
+        except Exception as e:
+            print(f"   FAILED: {type(e).__name__}: {str(e)[:200]}")
+            traceback.print_exc(limit=3)
+            continue
+        per_cls = {}
+        for d in dets:
+            for c in d["cls"]:
+                per_cls[names[int(c)]] = per_cls.get(names[int(c)], 0) + 1
+        confs = np.concatenate([d["conf"] for d in dets]) if dets else np.zeros(0)
+        row = dict(label=label, path=path, ms=ms, dets=dets, per_cls=per_cls,
+                   boxes=sum(len(d["cls"]) for d in dets), conf=float(confs.mean()) if len(confs) else None, names=names)
+        if ref is None:
+            ref = row
+        else:
+            row["any"] = compare_runs(ref["dets"], dets, class_aware=False)
+            row["cls"] = compare_runs(ref["dets"], dets, class_aware=True)
+            row["missed"] = missed_by_class(ref, row, ref["names"])
+            if args.save_diff:
+                save_diff_frames(raw, ref, row, args.save_diff, label)
+            row["frames_diff"] = sum(len(a["cls"]) != len(b["cls"]) for a, b in zip(ref["dets"], dets))
+        print(f"   {ms:6.1f} ms/frame, {row['boxes']} boxes, by class {per_cls}")
+        results.append(row)
+
+    test_scores = {}
+    if args.data:
+        for label, path in WEIGHTS:
+            if os.path.exists(path):
+                try:
+                    test_scores[label] = val_test_split(path, args.data, args.imgsz, device)
+                    print(f"\ntest split {label}: {test_scores[label]}")
+                except Exception as e:
+                    print(f"\ntest split {label}: FAILED {type(e).__name__}: {str(e)[:200]}")
+
+    L = ["", f"SUMMARY  {len(raw)} frames from frame {args.start_frame}, {device}{' fp16' if half else ''}, "
+             f"{args.imgsz}x{args.imgsz}, conf {args.conf}, ultralytics {ultralytics.__version__}", ""]
+    L.append(f"{'weights':<18}{'ms/frame':>9}{'boxes':>7}{'avg conf':>9}   boxes by class")
+    for r in results:
+        conf = "  n/a" if r["conf"] is None else f"{r['conf']:.2f}"
+        L.append(f"{r['label']:<18}{r['ms']:9.1f}{r['boxes']:7d}{conf:>9}   {r['per_cls']}")
+    L += ["", "AGREEMENT WITH v10 (IoU >= 0.5; not accuracy: v10 is not the truth)",
+          f"{'weights':<18}{'class ignored':^27}{'same class required':^27}{'frames with':>14}",
+          f"{'':<18}{'v10 found':>10}{'new in v10':>11}{'IoU':>6}{'v10 found':>10}{'new in v10':>11}{'IoU':>6}{'other count':>14}"]
+    for r in results[1:]:
+        a, c = r["any"], r["cls"]
+        iou = lambda x: "  n/a" if x["mean_iou"] is None else f"{x['mean_iou']:.2f}"
+        L.append(f"{r['label']:<18}{pct(a['recall']):>10}{pct(a['precision']):>11}{iou(a):>6}"
+                 f"{pct(c['recall']):>10}{pct(c['precision']):>11}{iou(c):>6}{r['frames_diff']:>9}/{len(raw)}")
+    L += ["", "v10 BOXES THE NEW WEIGHTS DID NOT FIND, by v10's class"]
+    for r in results[1:]:
+        L.append(f"{r['label']:<18}{r['missed']}")
+
+    # ----- the same comparison, counting only boxes the pipeline would keep (foot point on the pitch)
+    if len(results) > 1 and os.path.exists(args.pitch_db):
+        polygon = load_pitch_polygon(args.pitch_db)
+        h0, w0 = raw[0].shape[:2]
+        pr = []
+        for r in results:
+            d2 = [filter_dets(d, inside_pitch_mask(d, polygon, w0, h0)) for d in r["dets"]]
+            cls_count = {}
+            for d in d2:
+                for c in d["cls"]:
+                    cls_count[r["names"][int(c)]] = cls_count.get(r["names"][int(c)], 0) + 1
+            pr.append(dict(label=r["label"], dets=d2, names=r["names"], per_cls=cls_count, boxes=sum(len(d["cls"]) for d in d2)))
+        L += ["", "ON THE PITCH ONLY (boxes the pipeline would keep: foot point inside the pitch outline from " + os.path.basename(args.pitch_db) + ")",
+              f"{'weights':<18}{'boxes':>7}   by class  |  vs v10: v10 found / new in v10 / same class: v10 found, IoU / frames with other count"]
+        for k, r in enumerate(pr):
+            if k == 0:
+                L.append(f"{r['label']:<18}{r['boxes']:7d}   {r['per_cls']}")
+                continue
+            a = compare_runs(pr[0]["dets"], r["dets"], class_aware=False)
+            c = compare_runs(pr[0]["dets"], r["dets"], class_aware=True)
+            fd = sum(len(x["cls"]) != len(y["cls"]) for x, y in zip(pr[0]["dets"], r["dets"]))
+            iou = "n/a" if a["mean_iou"] is None else f"{a['mean_iou']:.2f}"
+            L.append(f"{r['label']:<18}{r['boxes']:7d}   {r['per_cls']}  |  {pct(a['recall'])} / {pct(a['precision'])} / {pct(c['recall'])}, IoU {iou} / {fd}/{len(raw)}")
+            miss = missed_by_class(pr[0], r, pr[0]["names"])
+            L.append(f"{'':<18}        v10 boxes on the pitch that it did not find: {miss}")
+    elif len(results) > 1:
+        L += ["", f"(pitch-only table skipped: {args.pitch_db} not found - pass --pitch-db)"]
+    if test_scores:
+        L += ["", "ROBOFLOW TEST SPLIT (Ultralytics val, conf 0.001)", f"{'weights':<18}{'P':>7}{'R':>7}{'mAP50':>8}{'mAP50-95':>10}"]
+        for k, s in test_scores.items():
+            L.append(f"{k:<18}{s['p']:7.3f}{s['r']:7.3f}{s['map50']:8.3f}{s['map']:10.3f}")
+    out = "\n".join(L)
+    print(out)
+    with open("compare_player_models_results.txt", "w") as fh:
+        fh.write(out + "\n")
+    print("\n(saved to compare_player_models_results.txt)")
+
+
+if __name__ == "__main__":
+    main()

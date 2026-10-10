@@ -32,18 +32,7 @@ class CreateStatisticsReport:
         self.GAME_RECORD = GAME_RECORD
         self.GAME_RUNNING_SPEED = float(GAME_RECORD['running_speed_km_h'])
 
-        # self.fps = VIDEO frames per second: frame_id is the video frame number, so frame_id -> seconds and the
-        # "N seconds in frames" thresholds use it. self.detection_fps = detections per second (counts of detections).
-        self.detection_fps = DETECTION_FPS
         self.fps = DETECTION_FPS
-        try:
-            _c = sqlite3.connect(self.db_path)
-            _row = _c.execute('SELECT video_fps FROM game WHERE game_id = ?', (GAME_RECORD['game_id'],)).fetchone()
-            _c.close()
-            if _row and _row[0]:
-                self.fps = float(_row[0])
-        except Exception as e:
-            print(f"⚠️ Could not read the video fps from the database ({e}): using the detection fps")
         # Create the output video file name:
         timestr = time.strftime("%Y%m%d-%H%M%S")
         self.REPORT_FILE = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-stats-report-{timestr}.pdf"
@@ -301,12 +290,12 @@ class CreateStatisticsReport:
                     consecutive_count += 1
                     
                     # we only count it as running if the speed is above threshold for 1 second:
-                    if consecutive_count >= self.detection_fps/2:
+                    if consecutive_count >= self.fps/2:
                         # Convert frame_id to time (mm:ss)
-                        time_seconds = start_frame / self.fps
+                        time_seconds = start_frame / 24
                         time_mm_ss = f"{int(time_seconds // 60):02}:{int(time_seconds % 60):02}"
                         sustained_speeds.append(
-                            f"{time_mm_ss} -- {team} player {tracker_id} sustained speed above 15 km/h for {self.detection_fps/2} detections (speed: {speed:.2f} km/h)"
+                            f"{time_mm_ss} -- {team} player {tracker_id} sustained speed above 15 km/h for {self.fps/2} frames (speed: {speed:.2f} km/h)"
                         )
                         consecutive_count = 0  # Reset to avoid duplicate entries
                 else:

@@ -1,8 +1,8 @@
 # define the teams we are using including their dominant colors:
 class Teams:
 
-    def __init__(self, source='excel'):
-        # source 'database' = kit colours come from the game logger app's Teams page instead of the list below
+    def __init__(self):
+        
         self.TEAMS = {
             "Polis": [
                 {"rgb": (50, 94, 46), "tolerance": (10, 50, 50)}, 
@@ -38,14 +38,6 @@ class Teams:
             ]
         }
         '''
-        if source == 'database':
-            from game_logger import db as _gl_db, record as _gl_record
-            _conn = _gl_db.connect()
-            try:
-                self.TEAMS = _gl_record.pipeline_teams(_conn)
-            finally:
-                _conn.close()
-
     # PASS BACK ALL THE TEAMS:
     def get_all_teams(self):
         return self.TEAMS

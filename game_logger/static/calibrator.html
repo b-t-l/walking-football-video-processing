@@ -1,0 +1,1196 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Pitch Calibrator</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: zoomable canvas stage (left) + point checklist / export panel (right); stacks to one column under 860px. */
+:root{
+  --bg:#f2efe7;
+  --panel:#ffffff;
+  --panel-2:#faf8f3;
+  --ink:#1b2420;
+  --muted:#5e6b62;
+  --line:#dcd5c6;
+  --accent:#2f6b4f;
+  --accent-ink:#f6fbf7;
+  --warn:#b4592a;
+  --focus:#1f6fb2;
+  --danger:#b23b3b;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#11150f;
+    --panel:#1a2019;
+    --panel-2:#1f261e;
+    --ink:#edf1ea;
+    --muted:#93a399;
+    --line:#2d362c;
+    --accent:#63b589;
+    --accent-ink:#0b140d;
+    --warn:#e2914f;
+    --focus:#6fb4ef;
+    --danger:#e07a7a;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11150f; --panel:#1a2019; --panel-2:#1f261e; --ink:#edf1ea; --muted:#93a399;
+  --line:#2d362c; --accent:#63b589; --accent-ink:#0b140d; --warn:#e2914f; --focus:#6fb4ef; --danger:#e07a7a;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg); color:var(--ink); font-family:var(--sans); margin:0; padding-inline:16px;}
+.app{width:100%; margin:0; padding-block:20px 48px;}
+header h1{font-size:1.5rem; font-weight:700; margin:0 0 6px; letter-spacing:-0.01em;}
+header p.sub{margin:0; color:var(--muted); max-width:62ch; line-height:1.5; font-size:.95rem;}
+code{font-family:var(--mono); background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:.05em .35em; font-size:.9em;}
+
+.workbench{display:grid; grid-template-columns:1fr 320px; gap:20px; margin-top:20px; align-items:start;}
+@media (max-width:860px){ .workbench{grid-template-columns:1fr;} }
+
+.stage-wrap{min-width:0;}
+.stage-toolbar{display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; align-items:center; margin-bottom:8px;}
+.toolgroup{display:flex; align-items:center; gap:6px;}
+button{font-family:var(--sans); font-size:.85rem; font-weight:600; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:7px; padding:6px 10px; cursor:pointer;}
+button:hover{border-color:var(--accent);}
+button:focus-visible{outline:2px solid var(--focus); outline-offset:1px;}
+button.primary{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+button.ghost{background:transparent; color:var(--danger); border-color:var(--line);}
+button.ghost:hover{border-color:var(--danger);}
+button.tiny{padding:2px 7px; font-size:.72rem; border-radius:5px;}
+.zoomLabel{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:.82rem; color:var(--muted); min-width:3.6em; text-align:center;}
+.fileBtn{font-size:.85rem; font-weight:600; border:1px solid var(--line); background:var(--panel); border-radius:7px; padding:6px 10px; cursor:pointer; display:inline-block;}
+.fileBtn:hover{border-color:var(--accent);}
+.imgMeta{font-family:var(--mono); font-size:.78rem; color:var(--muted);}
+
+.stage{position:relative; width:100%; aspect-ratio:16/9; background:#05070a; border-radius:12px; overflow:hidden; border:1px solid var(--line);}
+.stage canvas#canvas{position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair;}
+.banner{position:absolute; left:10px; bottom:10px; right:10px; background:rgba(10,14,10,.72); color:#fff; font-size:.82rem; padding:7px 11px; border-radius:8px; backdrop-filter:blur(3px); pointer-events:none;}
+.banner b{color:var(--accent-ink,#fff); font-weight:700;}
+.loupe{position:absolute; top:10px; right:10px; width:160px; background:rgba(10,14,10,.55); border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:5px; backdrop-filter:blur(2px);}
+.loupe canvas{display:block; width:150px; height:150px; border-radius:5px; background:#000;}
+.loupeCoord{font-family:var(--mono); color:#dfe8e0; font-size:.72rem; text-align:center; margin-top:4px; font-variant-numeric:tabular-nums;}
+.loupe[hidden]{display:none;}
+p.hint{color:var(--muted); font-size:.8rem; margin:8px 2px 0; line-height:1.5;}
+
+.panel{min-width:0;}
+.panelSection{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 14px 16px; margin-bottom:14px;}
+.panelSection h2{font-size:.82rem; text-transform:uppercase; letter-spacing:.05em; margin:0 0 10px; font-weight:600; color:var(--muted); display:flex; align-items:center; gap:8px; justify-content:space-between;}
+.panelSection h2 .count{font-family:var(--mono); color:var(--accent); font-variant-numeric:tabular-nums;}
+.panelSection h2 .hintSmall{font-weight:400; text-transform:none; letter-spacing:0; font-size:.78rem; color:var(--muted);}
+.panelSection h3{font-size:.78rem; margin:10px 0 6px; color:var(--ink); font-weight:600;}
+.panelSection h3:first-of-type{margin-top:0;}
+#curveSection .pointList{margin-bottom:6px;}
+#curveSection button.tiny{margin-bottom:4px;}
+#curveSection .emptyNote{margin:0 0 6px;}
+
+.panelSection.accordion{padding:0; overflow:hidden;}
+.panelSection.accordion > .accHeader{margin:0; padding:14px; cursor:pointer; user-select:none;}
+.panelSection.accordion > .accHeader:hover{color:var(--ink);}
+.panelSection.accordion > .accHeader:focus-visible{outline:2px solid var(--focus); outline-offset:-2px;}
+.panelSection.accordion.open > .accHeader{color:var(--ink);}
+.panelSection.accordion .hLeft{display:flex; align-items:center; gap:8px; min-width:0;}
+.panelSection.accordion .chev{flex:none; transition:transform .15s ease; color:var(--muted); font-size:1.15rem; line-height:1;}
+.panelSection.accordion.open .chev{transform:rotate(90deg); color:var(--accent);}
+.panelSection.accordion .accBody{padding:0 14px 16px;}
+
+.pointList{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px;}
+.pointRow{display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; padding:7px 8px; border:1px solid var(--line); border-radius:8px; background:var(--panel-2);}
+.pointRow.active{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;}
+.pointRow .swatch{width:9px; height:9px; border-radius:50%; flex:none;}
+.pointRow .rowMain{min-width:0;}
+.pointRow .rowLabel{font-size:.83rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.pointRow .rowHint{font-size:.72rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.pointRow .coords{display:flex; gap:4px; margin-top:3px;}
+.pointRow input[type=number]{width:3.6em; font-family:var(--mono); font-size:.76rem; padding:2px 4px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--ink);}
+.pointRow .rowActions{display:flex; gap:4px; flex:none;}
+.addCustom{display:flex; gap:6px; margin-top:10px;}
+.addCustom input[type=text]{flex:1; min-width:0; font-family:var(--sans); font-size:.82rem; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); color:var(--ink);}
+.emptyNote{color:var(--muted); font-size:.78rem; font-style:italic;}
+
+.dimGrid{display:grid; grid-template-columns:1fr 1fr; gap:10px 12px; margin-bottom:8px;}
+.dimGrid label{display:flex; flex-direction:column; gap:3px; font-size:.74rem; color:var(--muted); font-weight:600;}
+.dimGrid input{font-family:var(--mono); font-size:.86rem; padding:5px 7px; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); color:var(--ink);}
+.dimGrid input:focus-visible{outline:2px solid var(--focus); outline-offset:1px;}
+.dimReset{margin-top:2px;}
+
+#exportOut{display:flex; flex-direction:column; gap:10px; margin-top:10px;}
+#exportOut label{font-size:.76rem; color:var(--muted); font-weight:600; display:block; margin-bottom:4px;}
+.copyRow{display:flex; gap:6px; align-items:flex-start;}
+.loadBox{margin-bottom:12px; display:flex; flex-direction:column; gap:6px;}
+.loadBox textarea{width:100%; box-sizing:border-box; font-family:var(--mono); font-size:.76rem; background:var(--panel-2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:7px; resize:vertical;}
+.copyRow textarea{flex:1; min-width:0; font-family:var(--mono); font-size:.76rem; background:var(--panel-2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:7px; resize:vertical;}
+</style>
+
+<!-- game logger bridge: connects the calibrator to a game in the database -->
+<link rel="stylesheet" href="/static/nav.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<style>
+body > .gl-nav, #glsub{margin:0 -16px}
+.gl-nav{box-sizing:border-box}
+#glsub{background:var(--panel);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;font-size:.85rem}
+#glsub input.t{font-family:var(--mono);font-size:.85rem;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--panel-2);color:var(--ink);width:5.5em}
+#glstatus{flex:1 1 300px;font-size:.82rem;color:var(--muted)}
+#glstatus.bad{color:var(--danger)} #glstatus.ok{color:var(--accent);font-weight:600} #glstatus.warn{color:var(--warn)}
+</style>
+<header class="gl-nav">
+  <a class="gl-brand" href="/" title="All games"><img src="/static/logo.svg" alt=""><span>Game logger<small>Pitch calibrator</small></span></a>
+  <div class="gl-context"><a class="gl-btn" id="glBack" href="/">&larr; All games</a><span class="gl-title" id="glTitle"></span></div>
+  <div class="gl-actions"><span class="gl-note" id="glDirty"></span><input class="gl-input" id="glLabel" placeholder="Label (optional)" autocomplete="off"><button type="button" class="gl-btn primary" id="glSave">Save to game</button></div>
+</header>
+<div id="glsub">
+  <span class="toolgroup"><label for="glTime" style="color:var(--muted)">Frame at</label><input class="t" id="glTime" placeholder="MM:SS" autocomplete="off"><button type="button" id="glGet">Get frame</button><button type="button" id="glReload" title="Put the saved points back on this frame">Reload saved points</button></span>
+  <div id="glstatus"></div>
+</div>
+
+<div class="app">
+  <header>
+    <h1>Pitch Calibrator</h1>
+    <p class="sub">Click the pitch landmarks on a frame of the game video. Use <b>Save to game</b> in the bar above to store the calibration with the game.</p>
+  </header>
+
+  <div class="workbench">
+    <section class="stage-wrap">
+      <div class="stage-toolbar">
+        <div class="toolgroup">
+          <button id="btnZoomOut" type="button" title="Zoom out">&minus;</button>
+          <span class="zoomLabel" id="zoomLabel">100%</span>
+          <button id="btnZoomIn" type="button" title="Zoom in">+</button>
+          <button id="btnFit" type="button">Fit</button>
+        </div>
+        <div class="toolgroup">
+          <label class="fileBtn">Load frame<input type="file" id="fileInput" accept="image/*" hidden></label>
+          <span class="imgMeta" id="imgMeta"></span>
+        </div>
+      </div>
+
+      <div class="stage" id="stage">
+        <canvas id="canvas"></canvas>
+        <div class="loupe" id="loupe" hidden>
+          <canvas id="loupeCanvas" width="150" height="150"></canvas>
+          <div class="loupeCoord" id="loupeCoord">&mdash;</div>
+        </div>
+        <div class="banner" id="banner"></div>
+      </div>
+      <p class="hint">Scroll to zoom, right&#8209;click and drag to pan (pinch and one&#8209;finger drag work on touch). Click the image to place the highlighted point below; arrow keys nudge it 1px, Shift+arrow 10px.</p>
+    </section>
+
+    <aside class="panel" id="accordionGroup">
+      <div class="panelSection accordion" data-acc="export">
+        <h2 class="accHeader" tabindex="0" role="button" aria-expanded="false"><span class="hLeft">Export</span><span class="chev">&rsaquo;</span></h2>
+        <div class="accBody" hidden>
+          <div class="loadBox">
+            <label for="loadJson">Load existing JSON</label>
+            <textarea id="loadJson" rows="3" placeholder="Paste a saved calibration here (the Full point set JSON), then Load"></textarea>
+            <div class="copyRow"><button id="btnLoadJson" class="tiny" type="button">Load</button><span id="loadStatus" class="emptyNote"></span></div>
+          </div>
+          <button id="btnExport" class="primary" type="button">Build export</button>
+          <div id="exportOut" hidden>
+            <div>
+              <label for="exportXlsx">Spreadsheet-style values (not needed any more)</label>
+              <div class="copyRow"><textarea id="exportXlsx" readonly rows="5"></textarea><button class="tiny" data-copy="exportXlsx" type="button">Copy</button></div>
+            </div>
+            <div>
+              <label for="exportJson">Full point set (JSON)</label>
+              <div class="copyRow"><textarea id="exportJson" readonly rows="7"></textarea><button class="tiny" data-copy="exportJson" type="button">Copy</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panelSection accordion" data-acc="dims">
+        <h2 class="accHeader" tabindex="0" role="button" aria-expanded="false"><span class="hLeft">Pitch dimensions <span class="hintSmall">metres</span></span><span class="chev">&rsaquo;</span></h2>
+        <div class="accBody" hidden>
+          <div class="dimGrid">
+            <label>Pitch width<input type="number" id="dimWidth" step="0.1" min="0"></label>
+            <label>Pitch length<input type="number" id="dimLength" step="0.1" min="0"></label>
+            <label>Centre circle radius<input type="number" id="dimCentreRadius" step="0.1" min="0"></label>
+            <label>End arc radius<input type="number" id="dimEndArcRadius" step="0.1" min="0"></label>
+            <label>End arc max depth (flat part)<input type="number" id="dimEndArcMaxDepth" step="0.1" min="0"></label>
+          </div>
+          <p class="emptyNote" id="dimNote">Defaults are Polis's measured figures. The end arcs are a circle around the goal centre, flattened where they reach the max depth (set 0 for a plain semicircle). Change them if you calibrate a different pitch.</p>
+          <button id="btnDimReset" class="tiny dimReset" type="button">Reset to Polis defaults</button>
+        </div>
+      </div>
+
+      <div class="panelSection accordion" data-acc="outline">
+        <h2 class="accHeader" tabindex="0" role="button" aria-expanded="true"><span class="hLeft">Pitch outline <span class="count" id="reqCount">0 / 6</span></span><span class="chev">&rsaquo;</span></h2>
+        <div class="accBody">
+          <ol class="pointList" id="reqList"></ol>
+        </div>
+      </div>
+
+      <div class="panelSection accordion" data-acc="curves" id="curveSection">
+        <h2 class="accHeader" tabindex="0" role="button" aria-expanded="false"><span class="hLeft">Circles &amp; arcs <span class="hintSmall">a few points per curve</span></span><span class="chev">&rsaquo;</span></h2>
+        <div class="accBody" id="curveBody" hidden></div>
+      </div>
+
+      <div class="panelSection accordion" data-acc="goals">
+        <h2 class="accHeader" tabindex="0" role="button" aria-expanded="false"><span class="hLeft">Goal posts <span class="hintSmall">for player foot position &middot; base + top of each post</span></span><span class="chev">&rsaquo;</span></h2>
+        <div class="accBody" hidden>
+          <p class="emptyNote">Click the bottom (on the ground) and the top of each upright. How these posts lean tells the pipeline where upright lines converge, so it can place each player&rsquo;s feet correctly. Only the post lines matter &mdash; the crossbar isn&rsquo;t used.</p>
+          <h3>Left goal</h3>
+          <ol class="pointList" id="goalLeftList"></ol>
+          <h3>Right goal</h3>
+          <ol class="pointList" id="goalRightList"></ol>
+        </div>
+      </div>
+
+      <div class="panelSection">
+        <h2>Netting edge <span class="hintSmall">blacked out in the annotated video</span></h2>
+        <p class="emptyNote">Press <strong>Start clicking</strong>, then click along the lower edge of the netting from the far left of the picture to the far right (6&ndash;10 clicks around the curve is plenty). Everything above this line is covered with black in the annotated video. Press <strong>Stop</strong> when finished.</p>
+        <div class="addCustom">
+          <button id="btnNetStart" type="button">Start clicking</button>
+          <button id="btnNetUndo" class="ghost" type="button">Undo last</button>
+          <button id="btnNetClear" class="ghost" type="button">Clear line</button>
+        </div>
+        <p class="emptyNote" id="netStatus">No points yet.</p>
+      </div>
+
+      <div class="panelSection">
+        <h2>Custom points <span class="hintSmall">anything else</span></h2>
+        <ol class="pointList" id="customList"></ol>
+        <p class="emptyNote" id="customEmpty">None added yet.</p>
+        <form class="addCustom" id="addCustomForm">
+          <input type="text" id="customName" placeholder="point name" required>
+          <button type="submit">Add</button>
+        </form>
+      </div>
+
+      <div class="panelSection">
+        <button id="btnResetAll" class="ghost" type="button">Clear all points</button>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(function(){
+  const SAMPLE_IMAGE = '';
+
+  const REQUIRED = [
+    {key:'left_bottom', label:'Left bottom', hint:'Near touchline meets left goal line'},
+    {key:'left_top', label:'Left top', hint:'Far touchline meets left goal line'},
+    {key:'right_top', label:'Right top', hint:'Far touchline meets right goal line'},
+    {key:'right_bottom', label:'Right bottom', hint:'Near touchline meets right goal line'},
+    {key:'centre_top', label:'Centre top', hint:'Halfway line meets far touchline'},
+    {key:'centre_bottom', label:'Centre bottom', hint:'Halfway line meets near touchline'},
+  ];
+
+  const CURVE_GROUPS = [
+    {key:'centre_circle', label:'Centre circle', code:'CC', hint:'radius set above, centred on the halfway line'},
+    {key:'end_arc_left', label:'Goal arc — left end', code:'GL', hint:'circle round the goal centre; flat part where it reaches the max depth'},
+    {key:'end_arc_right', label:'Goal arc — right end', code:'GR', hint:'circle round the goal centre; flat part where it reaches the max depth'},
+  ];
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const stage = document.getElementById('stage');
+  const loupe = document.getElementById('loupe');
+  const loupeCanvas = document.getElementById('loupeCanvas');
+  const lctx = loupeCanvas.getContext('2d');
+  const loupeCoord = document.getElementById('loupeCoord');
+  const banner = document.getElementById('banner');
+  const zoomLabel = document.getElementById('zoomLabel');
+  const imgMeta = document.getElementById('imgMeta');
+  const reqList = document.getElementById('reqList');
+  const reqCount = document.getElementById('reqCount');
+  const goalLeftList = document.getElementById('goalLeftList');
+  const goalRightList = document.getElementById('goalRightList');
+  const curveBody = document.getElementById('curveBody');
+  const accordionGroup = document.getElementById('accordionGroup');
+  const customList = document.getElementById('customList');
+  const customEmpty = document.getElementById('customEmpty');
+  const addCustomForm = document.getElementById('addCustomForm');
+  const customName = document.getElementById('customName');
+  const fileInput = document.getElementById('fileInput');
+  const btnExport = document.getElementById('btnExport');
+  const exportOut = document.getElementById('exportOut');
+  const exportXlsx = document.getElementById('exportXlsx');
+  const exportJson = document.getElementById('exportJson');
+  const btnResetAll = document.getElementById('btnResetAll');
+  const btnNetStart = document.getElementById('btnNetStart');
+  const btnNetUndo = document.getElementById('btnNetUndo');
+  const btnNetClear = document.getElementById('btnNetClear');
+  const netStatus = document.getElementById('netStatus');
+  const dimWidth = document.getElementById('dimWidth');
+  const dimLength = document.getElementById('dimLength');
+  const dimCentreRadius = document.getElementById('dimCentreRadius');
+  const dimEndArcRadius = document.getElementById('dimEndArcRadius');
+  const dimEndArcMaxDepth = document.getElementById('dimEndArcMaxDepth');
+  const btnDimReset = document.getElementById('btnDimReset');
+
+  // Polis's measured pitch: 36 x 20 m, 3 m centre circle, end arcs of 7.5 m radius around the
+  // goal centre, flattened so they never reach further than 6 m from the goal line.
+  const DIM_DEFAULTS = {width:20, length:36, centre_radius:3, end_arc_radius:7.5, end_arc_max_depth:6};
+  const DIM_STORAGE_KEY = 'pitchCalibratorDims_v2';
+  let dims = Object.assign({}, DIM_DEFAULTS);
+
+  function loadDims(){
+    try{
+      const raw = localStorage.getItem(DIM_STORAGE_KEY);
+      if(raw){
+        const parsed = JSON.parse(raw);
+        dims = Object.assign({}, DIM_DEFAULTS, parsed);
+      }
+    }catch(e){ /* storage unavailable - fall back to defaults */ }
+  }
+  function saveDims(){
+    try{ localStorage.setItem(DIM_STORAGE_KEY, JSON.stringify(dims)); }catch(e){ /* ignore */ }
+  }
+  function applyDimsToInputs(){
+    dimWidth.value = dims.width;
+    dimLength.value = dims.length;
+    dimCentreRadius.value = dims.centre_radius;
+    dimEndArcRadius.value = dims.end_arc_radius;
+    dimEndArcMaxDepth.value = dims.end_arc_max_depth;
+  }
+  function wireDimInput(input, key){
+    input.addEventListener('input', ()=>{
+      const v = parseFloat(input.value);
+      if(!isNaN(v) && v>=0){ dims[key] = v; saveDims(); }
+    });
+  }
+  loadDims();
+  applyDimsToInputs();
+  wireDimInput(dimWidth,'width');
+  wireDimInput(dimLength,'length');
+  wireDimInput(dimCentreRadius,'centre_radius');
+  wireDimInput(dimEndArcRadius,'end_arc_radius');
+  wireDimInput(dimEndArcMaxDepth,'end_arc_max_depth');
+  btnDimReset.addEventListener('click', ()=>{
+    dims = Object.assign({}, DIM_DEFAULTS);
+    saveDims();
+    applyDimsToInputs();
+  });
+
+  let img = new Image();
+  let imgLoaded = false;
+  let imgLabel = 'sample frame';
+  const view = {scale:1, tx:0, ty:0, minScale:0.05};
+
+  let points = {};
+  const GOAL_POINT_LABELS = [
+    {label:'Left post \u00b7 base', hint:'bottom of the post, on the ground'},
+    {label:'Left post \u00b7 top', hint:'top of the same post (where it meets the crossbar)'},
+    {label:'Right post \u00b7 top', hint:'top of the other post'},
+    {label:'Right post \u00b7 base', hint:'bottom of the other post, on the ground'}
+  ];
+  let goalLeft = [null,null,null,null];
+  let goalRight = [null,null,null,null];
+  let custom = [];
+  let netEdge = [];          // clicked points along the lower edge of the netting
+  let netMode = false;       // true while every click on the picture adds a netting point
+  let curves = {};
+  CURVE_GROUPS.forEach(g=>{ curves[g.key] = []; });
+
+  let clickTarget = {group:'required', key:REQUIRED[0].key};
+  let nudgeTarget = null;
+
+  function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+  function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+  function getPointForTarget(t){
+    if(!t) return null;
+    if(t.group==='required') return points[t.key]||null;
+    if(t.group==='goal_left') return goalLeft[t.index];
+    if(t.group==='goal_right') return goalRight[t.index];
+    if(t.group==='custom') return (custom[t.index] && custom[t.index].x!=null) ? custom[t.index] : null;
+    if(t.group==='curve') return (curves[t.curveKey] && curves[t.curveKey][t.index] && curves[t.curveKey][t.index].x!=null) ? curves[t.curveKey][t.index] : null;
+    return null;
+  }
+  function setPointForTarget(t,x,y){
+    const rx = Math.round(x), ry = Math.round(y);
+    if(t.group==='required') points[t.key] = {x:rx,y:ry};
+    else if(t.group==='goal_left') goalLeft[t.index] = {x:rx,y:ry};
+    else if(t.group==='goal_right') goalRight[t.index] = {x:rx,y:ry};
+    else if(t.group==='custom' && custom[t.index]){ custom[t.index].x=rx; custom[t.index].y=ry; }
+    else if(t.group==='curve' && curves[t.curveKey] && curves[t.curveKey][t.index]){ curves[t.curveKey][t.index].x=rx; curves[t.curveKey][t.index].y=ry; }
+  }
+  function sameTarget(a,b){
+    if(!a||!b) return false;
+    return a.group===b.group && a.key===b.key && a.index===b.index && a.curveKey===b.curveKey;
+  }
+
+  function advanceClickTarget(){
+    for(const r of REQUIRED){ if(!points[r.key]){ clickTarget={group:'required', key:r.key}; return; } }
+    for(let i=0;i<4;i++){ if(!goalLeft[i]){ clickTarget={group:'goal_left', index:i}; return; } }
+    for(let i=0;i<4;i++){ if(!goalRight[i]){ clickTarget={group:'goal_right', index:i}; return; } }
+  }
+
+  function loadImageFromDataUrl(dataUrl, label){
+    const image = new Image();
+    image.onload = function(){
+      img = image;
+      imgLoaded = true;
+      imgLabel = label || imgLabel;
+      imgMeta.textContent = image.naturalWidth+'×'+image.naturalHeight+'px';
+      fitView();
+      renderAll();
+    };
+    image.src = dataUrl;
+  }
+
+  function resizeCanvasToDisplaySize(){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+    if(canvas.width !== w*dpr || canvas.height !== h*dpr){
+      canvas.width = w*dpr;
+      canvas.height = h*dpr;
+    }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {width:w, height:h};
+  }
+
+  function fitView(){
+    const rect = resizeCanvasToDisplaySize();
+    if(!imgLoaded) return;
+    const scale = Math.min(rect.width/img.naturalWidth, rect.height/img.naturalHeight);
+    view.scale = scale;
+    view.minScale = scale*0.4;
+    view.tx = (rect.width - img.naturalWidth*scale)/2;
+    view.ty = (rect.height - img.naturalHeight*scale)/2;
+    updateZoomLabel();
+  }
+
+  function updateZoomLabel(){
+    zoomLabel.textContent = Math.round(view.scale*100)+'%';
+  }
+
+  function zoomAt(cx,cy,factor){
+    const newScale = clamp(view.scale*factor, view.minScale, 10);
+    const imgX = (cx-view.tx)/view.scale, imgY = (cy-view.ty)/view.scale;
+    view.scale = newScale;
+    view.tx = cx - imgX*newScale;
+    view.ty = cy - imgY*newScale;
+    updateZoomLabel();
+    redraw();
+  }
+
+  function drawPoint(p,label,color,isActive){
+    const sx = p.x*view.scale+view.tx, sy = p.y*view.scale+view.ty;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sx,sy, isActive?7:5, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+    if(isActive){
+      ctx.beginPath();
+      ctx.arc(sx,sy,13,0,Math.PI*2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.font = '600 11px "IBM Plex Mono", monospace';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,.7)';
+    ctx.strokeText(label, sx+9, sy-9);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(label, sx+9, sy-9);
+    ctx.restore();
+  }
+
+  function toScreen(p){ return {x:p.x*view.scale+view.tx, y:p.y*view.scale+view.ty}; }
+
+  function redraw(){
+    const rect = resizeCanvasToDisplaySize();
+    ctx.clearRect(0,0,rect.width,rect.height);
+    ctx.fillStyle = '#05070a';
+    ctx.fillRect(0,0,rect.width,rect.height);
+    if(imgLoaded){
+      ctx.drawImage(img, view.tx, view.ty, img.naturalWidth*view.scale, img.naturalHeight*view.scale);
+    }
+
+    const corners = [points.left_bottom, points.left_top, points.right_top, points.right_bottom];
+    if(corners.every(Boolean)){
+      ctx.beginPath();
+      corners.concat([corners[0]]).forEach((p,i)=>{
+        const s = toScreen(p);
+        if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y);
+      });
+      ctx.strokeStyle = 'rgba(99,181,137,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5,4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if(points.centre_top && points.centre_bottom){
+      const a = toScreen(points.centre_top), b = toScreen(points.centre_bottom);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+      ctx.strokeStyle = 'rgba(99,181,137,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5,4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    REQUIRED.forEach((r,i)=>{
+      const p = points[r.key];
+      if(p) drawPoint(p, String(i+1), '#2f6b4f', sameTarget(clickTarget,{group:'required',key:r.key}));
+    });
+    [goalLeft, goalRight].forEach(g=>{
+      [[0,1],[3,2]].forEach(([a,b])=>{
+        if(g[a] && g[b]){
+          const sa = toScreen(g[a]), sb = toScreen(g[b]);
+          ctx.beginPath(); ctx.moveTo(sa.x,sa.y); ctx.lineTo(sb.x,sb.y);
+          ctx.strokeStyle = 'rgba(224,122,58,.95)'; ctx.lineWidth = 2; ctx.stroke();
+        }
+      });
+    });
+    goalLeft.forEach((p,i)=>{ if(p) drawPoint(p, 'L'+(i+1), '#b4592a', sameTarget(clickTarget,{group:'goal_left',index:i})); });
+    goalRight.forEach((p,i)=>{ if(p) drawPoint(p, 'R'+(i+1), '#b4592a', sameTarget(clickTarget,{group:'goal_right',index:i})); });
+    CURVE_GROUPS.forEach(g=>{
+      curves[g.key].forEach((p,i)=>{
+        if(p && p.x!=null) drawPoint(p, g.code+(i+1), '#8a5cd6', sameTarget(clickTarget,{group:'curve',curveKey:g.key,index:i}));
+      });
+    });
+    custom.forEach((c,i)=>{ if(c.x!=null) drawPoint(c, c.name.slice(0,3), '#1f6fb2', sameTarget(clickTarget,{group:'custom',index:i})); });
+    drawNetEdge();
+  }
+
+  function sortedNetEdge(){ return netEdge.slice().sort((a,b)=>a.x-b.x); }
+  function drawNetEdge(){
+    if(!netEdge.length || !imgLoaded) return;
+    const pts = sortedNetEdge();
+    if(pts.length>=2){
+      // preview of the black area: everything above the line, out to both picture edges
+      const poly = [{x:0,y:0},{x:img.naturalWidth,y:0},{x:img.naturalWidth,y:pts[pts.length-1].y}]
+        .concat(pts.slice().reverse()).concat([{x:0,y:pts[0].y}]);
+      ctx.beginPath();
+      poly.forEach((p,i)=>{ const s = toScreen(p); if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y); });
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fill();
+      ctx.beginPath();
+      pts.forEach((p,i)=>{ const s = toScreen(p); if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y); });
+      ctx.strokeStyle = '#ffb02e'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    pts.forEach(p=>{
+      const s = toScreen(p);
+      ctx.beginPath(); ctx.arc(s.x,s.y,4,0,Math.PI*2); ctx.fillStyle='#ffb02e'; ctx.fill();
+      ctx.lineWidth=1.5; ctx.strokeStyle='#1b2420'; ctx.stroke();
+    });
+  }
+  function updateNetUi(){
+    btnNetStart.textContent = netMode ? 'Stop' : 'Start clicking';
+    netStatus.textContent = netEdge.length ? (netEdge.length+' point'+(netEdge.length===1?'':'s')+(netMode?' \u2013 keep clicking along the netting edge, then press Stop':'')) : 'No points yet.';
+  }
+
+  function placeAt(cssX,cssY){
+    if(!imgLoaded) return;
+    const imgX = (cssX-view.tx)/view.scale, imgY = (cssY-view.ty)/view.scale;
+    if(imgX<0||imgY<0||imgX>img.naturalWidth||imgY>img.naturalHeight) return;
+    if(netMode){
+      netEdge.push({x:Math.round(imgX), y:Math.round(imgY)});
+      renderAll();
+      return;
+    }
+    setPointForTarget(clickTarget, imgX, imgY);
+    nudgeTarget = Object.assign({}, clickTarget);
+    advanceClickTarget();
+    renderAll();
+  }
+
+  function labelForTarget(t){
+    if(!t) return '';
+    if(t.group==='required'){ const r = REQUIRED.find(r=>r.key===t.key); return r ? r.label+' — '+r.hint : ''; }
+    if(t.group==='goal_left') return 'Left goal \u2013 '+GOAL_POINT_LABELS[t.index].label;
+    if(t.group==='goal_right') return 'Right goal \u2013 '+GOAL_POINT_LABELS[t.index].label;
+    if(t.group==='custom') return custom[t.index] ? custom[t.index].name : '';
+    if(t.group==='curve'){ const g = CURVE_GROUPS.find(g=>g.key===t.curveKey); return g ? g.label+', point '+(t.index+1) : ''; }
+    return '';
+  }
+
+  function updateBanner(){
+    const remaining = REQUIRED.filter(r=>!points[r.key]).length;
+    if(remaining>0){
+      banner.innerHTML = 'Click the image to set: <b>'+labelForTarget(clickTarget)+'</b>';
+    } else {
+      banner.innerHTML = 'All outline points set. Click to set: <b>'+labelForTarget(clickTarget)+'</b>';
+    }
+  }
+
+  function makeRow(opts){
+    const li = document.createElement('li');
+    li.className = 'pointRow' + (opts.active ? ' active' : '');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = opts.color;
+    const main = document.createElement('div');
+    main.className = 'rowMain';
+    const lab = document.createElement('div');
+    lab.className = 'rowLabel';
+    lab.textContent = opts.label;
+    main.appendChild(lab);
+    if(opts.hint){
+      const h = document.createElement('div');
+      h.className = 'rowHint';
+      h.textContent = opts.hint;
+      main.appendChild(h);
+    }
+    const coordsRow = document.createElement('div');
+    coordsRow.className = 'coords';
+    const xIn = document.createElement('input');
+    xIn.type = 'number'; xIn.placeholder = 'x';
+    const yIn = document.createElement('input');
+    yIn.type = 'number'; yIn.placeholder = 'y';
+    const p = opts.get();
+    if(p){ xIn.value = p.x; yIn.value = p.y; }
+    function commit(){
+      const xv = xIn.value, yv = yIn.value;
+      if(xv!=='' && yv!=='' && !isNaN(+xv) && !isNaN(+yv)){
+        opts.set(+xv, +yv);
+        redraw();
+        updateCounts();
+      }
+    }
+    xIn.addEventListener('change', commit);
+    yIn.addEventListener('change', commit);
+    coordsRow.appendChild(xIn); coordsRow.appendChild(yIn);
+    main.appendChild(coordsRow);
+
+    const actions = document.createElement('div');
+    actions.className = 'rowActions';
+    const placeBtn = document.createElement('button');
+    placeBtn.type = 'button'; placeBtn.className = 'tiny';
+    placeBtn.textContent = opts.active ? 'Placing…' : 'Place';
+    placeBtn.addEventListener('click', ()=>{
+      clickTarget = opts.target;
+      nudgeTarget = opts.target;
+      renderAll();
+    });
+    actions.appendChild(placeBtn);
+    if(p){
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button'; clearBtn.className = 'tiny';
+      clearBtn.textContent = '✕';
+      clearBtn.title = 'Clear this point';
+      clearBtn.addEventListener('click', ()=>{
+        opts.clear();
+        renderAll();
+      });
+      actions.appendChild(clearBtn);
+    }
+    if(opts.remove){
+      const rmBtn = document.createElement('button');
+      rmBtn.type='button'; rmBtn.className='tiny';
+      rmBtn.textContent='Remove';
+      rmBtn.addEventListener('click', ()=>{ opts.remove(); renderAll(); });
+      actions.appendChild(rmBtn);
+    }
+
+    li.appendChild(swatch); li.appendChild(main); li.appendChild(actions);
+    return li;
+  }
+
+  function updateCounts(){
+    const n = REQUIRED.filter(r=>points[r.key]).length;
+    reqCount.textContent = n+' / '+REQUIRED.length;
+  }
+
+  function renderLists(){
+    reqList.innerHTML = '';
+    REQUIRED.forEach(r=>{
+      const target = {group:'required', key:r.key};
+      reqList.appendChild(makeRow({
+        label:r.label, hint:r.hint, color:'#2f6b4f', target:target,
+        active: sameTarget(clickTarget,target),
+        get: ()=>points[r.key],
+        set: (x,y)=>{ points[r.key] = {x:Math.round(x),y:Math.round(y)}; },
+        clear: ()=>{ delete points[r.key]; }
+      }));
+    });
+    updateCounts();
+
+    goalLeftList.innerHTML = '';
+    for(let i=0;i<4;i++){
+      const target = {group:'goal_left', index:i};
+      goalLeftList.appendChild(makeRow({
+        label:GOAL_POINT_LABELS[i].label, hint:GOAL_POINT_LABELS[i].hint, color:'#b4592a', target:target,
+        active: sameTarget(clickTarget,target),
+        get: ()=>goalLeft[i],
+        set: (x,y)=>{ goalLeft[i] = {x:Math.round(x),y:Math.round(y)}; },
+        clear: ()=>{ goalLeft[i]=null; }
+      }));
+    }
+    goalRightList.innerHTML = '';
+    for(let i=0;i<4;i++){
+      const target = {group:'goal_right', index:i};
+      goalRightList.appendChild(makeRow({
+        label:GOAL_POINT_LABELS[i].label, hint:GOAL_POINT_LABELS[i].hint, color:'#b4592a', target:target,
+        active: sameTarget(clickTarget,target),
+        get: ()=>goalRight[i],
+        set: (x,y)=>{ goalRight[i] = {x:Math.round(x),y:Math.round(y)}; },
+        clear: ()=>{ goalRight[i]=null; }
+      }));
+    }
+
+    customList.innerHTML = '';
+    customEmpty.hidden = custom.length>0;
+    custom.forEach((c,i)=>{
+      const target = {group:'custom', index:i};
+      customList.appendChild(makeRow({
+        label:c.name, color:'#1f6fb2', target:target,
+        active: sameTarget(clickTarget,target),
+        get: ()=> c.x!=null ? c : null,
+        set: (x,y)=>{ c.x=Math.round(x); c.y=Math.round(y); },
+        clear: ()=>{ c.x=null; c.y=null; },
+        remove: ()=>{ custom.splice(i,1); if(sameTarget(clickTarget,target)) advanceClickTarget(); }
+      }));
+    });
+
+    renderCurveGroups();
+  }
+
+  function renderCurveGroups(){
+    curveBody.innerHTML = '';
+    CURVE_GROUPS.forEach(g=>{
+      const h3 = document.createElement('h3');
+      h3.textContent = g.label;
+      curveBody.appendChild(h3);
+      const ol = document.createElement('ol');
+      ol.className = 'pointList';
+      curves[g.key].forEach((pt,i)=>{
+        const target = {group:'curve', curveKey:g.key, index:i};
+        ol.appendChild(makeRow({
+          label:'Point '+(i+1), hint: i===0 ? g.hint : '', color:'#8a5cd6', target:target,
+          active: sameTarget(clickTarget,target),
+          get: ()=> (pt && pt.x!=null) ? pt : null,
+          set: (x,y)=>{ curves[g.key][i] = {x:Math.round(x), y:Math.round(y)}; },
+          clear: ()=>{ curves[g.key][i] = {x:null,y:null}; },
+          remove: ()=>{ curves[g.key].splice(i,1); if(sameTarget(clickTarget,target)) advanceClickTarget(); }
+        }));
+      });
+      curveBody.appendChild(ol);
+      if(curves[g.key].length===0){
+        const empty = document.createElement('p');
+        empty.className = 'emptyNote';
+        empty.textContent = 'No points yet.';
+        curveBody.appendChild(empty);
+      }
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button'; addBtn.className = 'tiny';
+      addBtn.textContent = '+ Add point';
+      addBtn.addEventListener('click', function(){
+        curves[g.key].push({x:null, y:null});
+        clickTarget = {group:'curve', curveKey:g.key, index:curves[g.key].length-1};
+        nudgeTarget = clickTarget;
+        renderAll();
+      });
+      curveBody.appendChild(addBtn);
+    });
+  }
+
+  function setAccordionOpen(key){
+    accordionGroup.querySelectorAll('.panelSection.accordion').forEach(function(sec){
+      const isOpen = sec.dataset.acc === key;
+      const body = sec.querySelector('.accBody');
+      const header = sec.querySelector('.accHeader');
+      sec.classList.toggle('open', isOpen);
+      if(body) body.hidden = !isOpen;
+      if(header) header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    });
+  }
+  accordionGroup.querySelectorAll('.accHeader').forEach(function(header){
+    header.addEventListener('click', function(){
+      setAccordionOpen(header.closest('.panelSection.accordion').dataset.acc);
+    });
+    header.addEventListener('keydown', function(e){
+      if(e.key==='Enter' || e.key===' '){
+        e.preventDefault();
+        setAccordionOpen(header.closest('.panelSection.accordion').dataset.acc);
+      }
+    });
+  });
+  setAccordionOpen('outline');
+
+  function renderAll(){
+    updateNetUi();
+    renderLists();
+    redraw();
+    updateBanner();
+  }
+
+  // ---- load a previously exported calibration back in, so points don't need re-clicking
+  const loadJson = document.getElementById('loadJson');
+  const btnLoadJson = document.getElementById('btnLoadJson');
+  const loadStatus = document.getElementById('loadStatus');
+  btnLoadJson.addEventListener('click', function(){
+    try{
+      const obj = JSON.parse(loadJson.value);
+      const pt = p => (p && p.x!=null && p.y!=null) ? {x:Math.round(p.x), y:Math.round(p.y)} : null;
+      points = {};
+      Object.keys(obj.pitch_vertices || {}).forEach(k=>{ const p = pt(obj.pitch_vertices[k]); if(p) points[k] = p; });
+      const four = arr => [0,1,2,3].map(i => pt((arr||[])[i]));
+      goalLeft = four(obj.goal_posts_left_vertices);
+      goalRight = four(obj.goal_posts_right_vertices);
+      curves = {}; CURVE_GROUPS.forEach(g=>{ curves[g.key] = ((obj.circle_points||{})[g.key] || []).map(pt).filter(Boolean); });
+      custom = Array.isArray(obj.custom_points) ? obj.custom_points : [];
+      netEdge = Array.isArray(obj.top_mask_points) ? obj.top_mask_points.filter(p=>p && p.x!=null && p.y!=null).map(p=>({x:Math.round(p.x),y:Math.round(p.y)})) : [];
+      netMode = false;
+      if(obj.pitch_dimensions_m){ dims = Object.assign({}, DIM_DEFAULTS, obj.pitch_dimensions_m); saveDims(); applyDimsToInputs(); }
+      clickTarget = {group:'goal_left', index:0};
+      for(let i=0;i<4;i++){ if(!goalLeft[i]){ clickTarget = {group:'goal_left', index:i}; break; } }
+      setAccordionOpen('goals');
+      renderAll();
+      loadStatus.textContent = 'Loaded. Now click the goal posts (base, top, top, base).';
+    }catch(e){
+      loadStatus.textContent = 'Could not read that JSON: ' + e.message;
+    }
+  });
+
+  btnNetStart.addEventListener('click', function(){ netMode = !netMode; renderAll(); });
+  btnNetUndo.addEventListener('click', function(){ netEdge.pop(); renderAll(); });
+  btnNetClear.addEventListener('click', function(){ netEdge = []; netMode = false; renderAll(); });
+
+  addCustomForm.addEventListener('submit', function(e){
+    e.preventDefault();
+    const name = customName.value.trim();
+    if(!name) return;
+    custom.push({name:name, x:null, y:null});
+    customName.value = '';
+    clickTarget = {group:'custom', index:custom.length-1};
+    nudgeTarget = clickTarget;
+    renderAll();
+  });
+
+  fileInput.addEventListener('change', function(e){
+    const f = e.target.files[0];
+    if(!f) return;
+    const reader = new FileReader();
+    reader.onload = function(ev){
+      points = {}; goalLeft=[null,null,null,null]; goalRight=[null,null,null,null]; custom=[]; netEdge=[]; netMode=false;
+      curves = {}; CURVE_GROUPS.forEach(g=>{ curves[g.key] = []; });
+      clickTarget = {group:'required', key:REQUIRED[0].key};
+      nudgeTarget = null;
+      loadImageFromDataUrl(ev.target.result, f.name);
+    };
+    reader.readAsDataURL(f);
+  });
+
+  let resetArmed = false, resetTimer = null;
+  btnResetAll.addEventListener('click', function(){
+    if(!resetArmed){
+      resetArmed = true;
+      btnResetAll.textContent = 'Click again to confirm';
+      resetTimer = setTimeout(()=>{ resetArmed=false; btnResetAll.textContent='Clear all points'; }, 3000);
+      return;
+    }
+    clearTimeout(resetTimer);
+    resetArmed = false;
+    btnResetAll.textContent = 'Clear all points';
+    points = {}; goalLeft=[null,null,null,null]; goalRight=[null,null,null,null]; custom=[]; netEdge=[]; netMode=false;
+    curves = {}; CURVE_GROUPS.forEach(g=>{ curves[g.key] = []; });
+    clickTarget = {group:'required', key:REQUIRED[0].key};
+    nudgeTarget = null;
+    exportOut.hidden = true;
+    renderAll();
+  });
+
+  function fmtPair(p){ return p ? (p.x+','+p.y) : ''; }
+  function fmtGoalGroup(arr){
+    if(arr.every(p=>!p)) return '';
+    return '['+arr.map(p=> p ? ('('+p.x+','+p.y+')') : '()').join(',')+']';
+  }
+
+  btnExport.addEventListener('click', function(){
+    const lines = [
+      'pitch_vertices_left_bottom\t'+fmtPair(points.left_bottom),
+      'pitch_vertices_left_top\t'+fmtPair(points.left_top),
+      'pitch_vertices_right_top\t'+fmtPair(points.right_top),
+      'pitch_vertices_right_bottom\t'+fmtPair(points.right_bottom),
+      'pitch_vertices_centre_top\t'+fmtPair(points.centre_top),
+      'pitch_vertices_centre_bottom\t'+fmtPair(points.centre_bottom),
+      'goal_posts_left_vertices\t'+fmtGoalGroup(goalLeft),
+      'goal_posts_right_vertices\t'+fmtGoalGroup(goalRight)
+    ];
+    exportXlsx.value = lines.join('\n');
+
+    const circlePoints = {};
+    CURVE_GROUPS.forEach(g=>{
+      circlePoints[g.key] = curves[g.key].filter(p=> p && p.x!=null).map(p=>({x:p.x,y:p.y}));
+    });
+
+    const json = {
+      source_frame: imgLabel,
+      image_size: imgLoaded ? {w:img.naturalWidth, h:img.naturalHeight} : null,
+      pitch_dimensions_m: Object.assign({}, dims),
+      pitch_vertices: points,
+      goal_posts_left_vertices: goalLeft,
+      goal_posts_right_vertices: goalRight,
+      goal_post_order: 'base of left post, top of left post, top of right post, base of right post',
+      circle_points: circlePoints,
+      custom_points: custom,
+      top_mask_points: sortedNetEdge(),
+      generated_at: new Date().toISOString()
+    };
+    exportJson.value = JSON.stringify(json, null, 2);
+    exportOut.hidden = false;
+  });
+
+  document.addEventListener('click', function(e){
+    const btn = e.target.closest('[data-copy]');
+    if(!btn) return;
+    const ta = document.getElementById(btn.dataset.copy);
+    const original = btn.textContent;
+    navigator.clipboard.writeText(ta.value).then(()=>{
+      btn.textContent = 'Copied';
+      setTimeout(()=>{ btn.textContent = original; }, 1200);
+    }).catch(()=>{
+      ta.select();
+      btn.textContent = 'Select & copy';
+      setTimeout(()=>{ btn.textContent = original; }, 1500);
+    });
+  });
+
+  function updateLoupe(clientX, clientY){
+    if(!imgLoaded){ loupe.hidden = true; return; }
+    const rect = canvas.getBoundingClientRect();
+    const cssX = clientX-rect.left, cssY = clientY-rect.top;
+    if(cssX<0||cssY<0||cssX>rect.width||cssY>rect.height){ loupe.hidden = true; return; }
+    const imgX = (cssX-view.tx)/view.scale, imgY = (cssY-view.ty)/view.scale;
+    if(imgX<0||imgY<0||imgX>img.naturalWidth||imgY>img.naturalHeight){ loupe.hidden = true; return; }
+    loupe.hidden = false;
+    const zoom = 6, size = 150, half = size/(2*zoom);
+    lctx.imageSmoothingEnabled = false;
+    lctx.clearRect(0,0,size,size);
+    lctx.drawImage(img, imgX-half, imgY-half, half*2, half*2, 0, 0, size, size);
+    lctx.strokeStyle = 'rgba(255,255,255,.85)';
+    lctx.lineWidth = 1;
+    lctx.beginPath();
+    lctx.moveTo(size/2,0); lctx.lineTo(size/2,size);
+    lctx.moveTo(0,size/2); lctx.lineTo(size,size/2);
+    lctx.stroke();
+    loupeCoord.textContent = Math.round(imgX)+', '+Math.round(imgY);
+  }
+
+  const pointers = new Map();
+  let panState = null;
+  let pinchState = null;
+
+  canvas.addEventListener('contextmenu', e=> e.preventDefault());
+
+  canvas.addEventListener('wheel', function(e){
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX-rect.left, cy = e.clientY-rect.top;
+    const factor = Math.exp(-e.deltaY*0.0012);
+    zoomAt(cx,cy,factor);
+  }, {passive:false});
+
+  canvas.addEventListener('pointerdown', function(e){
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, {x:e.clientX,y:e.clientY, startX:e.clientX, startY:e.clientY, moved:false, type:e.pointerType, button:e.button});
+    if(pointers.size===2){
+      const pts = [...pointers.values()];
+      pinchState = {
+        startDist: dist(pts[0],pts[1]),
+        startScale: view.scale,
+        startTx: view.tx, startTy: view.ty,
+        midX: (pts[0].x+pts[1].x)/2, midY:(pts[0].y+pts[1].y)/2
+      };
+      panState = null;
+    } else if(pointers.size===1){
+      if(e.pointerType==='mouse' && e.button===2){
+        panState = {startTx:view.tx, startTy:view.ty, startX:e.clientX, startY:e.clientY};
+      }
+    }
+  });
+
+  canvas.addEventListener('pointermove', function(e){
+    updateLoupe(e.clientX, e.clientY);
+    const p = pointers.get(e.pointerId);
+    if(!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    if(Math.abs(e.clientX-p.startX)>3 || Math.abs(e.clientY-p.startY)>3) p.moved = true;
+
+    if(pointers.size===2 && pinchState){
+      const pts = [...pointers.values()];
+      const d = dist(pts[0],pts[1]);
+      const rect = canvas.getBoundingClientRect();
+      const midCssX = (pts[0].x+pts[1].x)/2-rect.left, midCssY=(pts[0].y+pts[1].y)/2-rect.top;
+      const newScale = clamp(pinchState.startScale*(d/pinchState.startDist), view.minScale, 10);
+      const imgX = (pinchState.midX-rect.left-pinchState.startTx)/pinchState.startScale;
+      const imgY = (pinchState.midY-rect.top-pinchState.startTy)/pinchState.startScale;
+      view.scale = newScale;
+      view.tx = midCssX - imgX*newScale;
+      view.ty = midCssY - imgY*newScale;
+      updateZoomLabel();
+      redraw();
+    } else if(panState){
+      view.tx = panState.startTx + (e.clientX-panState.startX);
+      view.ty = panState.startTy + (e.clientY-panState.startY);
+      redraw();
+    } else if(pointers.size===1 && e.pointerType==='touch' && p.moved){
+      if(!panState) panState = {startTx:view.tx, startTy:view.ty, startX:p.startX, startY:p.startY};
+      view.tx = panState.startTx + (e.clientX-panState.startX);
+      view.ty = panState.startTy + (e.clientY-panState.startY);
+      redraw();
+    }
+  });
+
+  function endPointer(e){
+    const p = pointers.get(e.pointerId);
+    pointers.delete(e.pointerId);
+    if(pinchState && pointers.size<2) pinchState = null;
+    if(p && !p.moved && pointers.size===0){
+      if(!(e.pointerType==='mouse' && e.button!==0)){
+        const rect = canvas.getBoundingClientRect();
+        placeAt(e.clientX-rect.left, e.clientY-rect.top);
+      }
+    }
+    if(pointers.size===0) panState = null;
+  }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('pointerleave', function(){ loupe.hidden = true; });
+
+  window.addEventListener('keydown', function(e){
+    const tag = document.activeElement && document.activeElement.tagName;
+    if(tag==='INPUT' || tag==='TEXTAREA') return;
+    if(!nudgeTarget) return;
+    const pt = getPointForTarget(nudgeTarget);
+    if(!pt) return;
+    const step = e.shiftKey ? 10 : 1;
+    let handled = true;
+    if(e.key==='ArrowLeft') pt.x -= step;
+    else if(e.key==='ArrowRight') pt.x += step;
+    else if(e.key==='ArrowUp') pt.y -= step;
+    else if(e.key==='ArrowDown') pt.y += step;
+    else handled = false;
+    if(handled){
+      e.preventDefault();
+      setPointForTarget(nudgeTarget, pt.x, pt.y);
+      renderAll();
+    }
+  });
+
+  window.addEventListener('resize', function(){ if(imgLoaded){ fitView(); redraw(); } });
+  renderAll();
+})();
+</script>
+
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const gid = parseInt(new URLSearchParams(location.search).get('game'), 10);
+  const NAMES = ['left_bottom','left_top','right_top','right_bottom','centre_top','centre_bottom'];
+  let game = null, saved = null, dirty = false;
+  const setDirty = v => { dirty = v; $('glDirty').textContent = v ? 'Unsaved changes' : ''; };
+  const status = (msg, kind) => { const s = $('glstatus'); s.textContent = msg || ''; s.className = kind || ''; };
+  const fmt = s => String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+  const parseT = v => { v = (v||'').trim(); if(!v) return null; const p = v.split(':'); if(p.some(x=>!/^\d+$/.test(x))||p.length>3) return NaN;
+    return p.reduce((a,x)=>a*60+parseInt(x,10),0); };
+  async function api(method, url, body){
+    const r = await fetch(url, {method, headers: body?{'Content-Type':'application/json'}:{}, body: body?JSON.stringify(body):undefined});
+    let d=null; try{ d = await r.json(); }catch(e){}
+    if(!r.ok){ const e = new Error(); e.errors = (d&&(d.errors||[d.detail])) || [r.statusText]; throw e; }
+    return d;
+  }
+  const dirtyOn = () => setDirty(true);
+  $('canvas').addEventListener('pointerdown', dirtyOn);
+  document.querySelector('.panel').addEventListener('input', dirtyOn);
+  window.addEventListener('beforeunload', e => { if(dirty){ e.preventDefault(); e.returnValue=''; } });
+
+  function waitForImage(){
+    return new Promise(res => {
+      const meta = $('imgMeta'); const t = setTimeout(()=>{ ob.disconnect(); res(false); }, 10000);
+      const ob = new MutationObserver(()=>{ clearTimeout(t); ob.disconnect(); setTimeout(()=>res(true), 30); });
+      ob.observe(meta, {childList:true, characterData:true, subtree:true});
+    });
+  }
+  function applySaved(){
+    if(!saved) return;
+    $('loadJson').value = JSON.stringify(saved);
+    $('btnLoadJson').click();
+    $('loadStatus').textContent = 'Loaded the points saved for this game.';
+    const m = /(\d+)\D+(\d+)px/.exec($('imgMeta').textContent || '');
+    if(m && saved.image_size && (+m[1] !== saved.image_size.w || +m[2] !== saved.image_size.h))
+      status('Warning: this frame is ' + m[1] + 'x' + m[2] + ' but the saved calibration was made on ' + saved.image_size.w + 'x' + saved.image_size.h + ' - the points will not line up.', 'warn');
+    setDirty(false);
+  }
+  async function getFrame(applySavedPoints){
+    if(!game) return;
+    const secs = parseT($('glTime').value);
+    if(secs === null || Number.isNaN(secs)){ status('Enter the time as MM:SS, e.g. 00:05', 'bad'); return; }
+    status('Getting the frame...');
+    const r = await fetch('/api/games/' + gid + '/frame?t=' + secs);
+    if(!r.ok){ let d=null; try{ d = await r.json(); }catch(e){} status((d && (d.errors||[d.detail]).join(' ')) || 'Could not get that frame', 'bad'); return; }
+    const label = decodeURIComponent(r.headers.get('X-Frame-Label') || ('frame @ ' + secs + 's'));
+    const blob = await r.blob();
+    const dt = new DataTransfer(); dt.items.add(new File([blob], label, {type:'image/jpeg'}));
+    const loaded = waitForImage();
+    $('fileInput').files = dt.files; $('fileInput').dispatchEvent(new Event('change', {bubbles:true}));
+    if(!(await loaded)){ status('The frame did not load', 'bad'); return; }
+    status('Frame loaded: ' + label);
+    if(applySavedPoints) applySaved(); else setDirty(false);
+  }
+
+  $('glGet').addEventListener('click', async () => {
+    if(dirty && !confirm('Getting a different frame clears the points you have clicked since the last save. Continue?')) return;
+    await getFrame(false);
+  });
+  $('glReload').addEventListener('click', () => {
+    if(!saved){ status('This game has no saved calibration yet.', 'warn'); return; }
+    if(dirty && !confirm('Replace the points on screen with the saved ones?')) return;
+    applySaved();
+  });
+  $('glSave').addEventListener('click', async () => {
+    $('btnExport').click();
+    let obj; try{ obj = JSON.parse($('exportJson').value); }catch(e){ status('Nothing to save yet.', 'bad'); return; }
+    if(!obj.image_size){ status('Load a frame first.', 'bad'); return; }
+    const missing = NAMES.filter(n => !obj.pitch_vertices[n]);
+    if(missing.length){ status('Click these outline points first: ' + missing.join(', ').replace(/_/g,' '), 'bad'); return; }
+    const notes = [];
+    if(!(obj.goal_posts_left_vertices||[]).every(Boolean) && !(obj.goal_posts_right_vertices||[]).every(Boolean)) notes.push('goal posts');
+    if(!(obj.top_mask_points||[]).length) notes.push('netting edge');
+    if(notes.length && !confirm('Not set yet: ' + notes.join(' and ') + '. Save anyway?')) return;
+    try{
+      const r = await api('POST', '/api/games/' + gid + '/calibrations', {json: $('exportJson').value, label: $('glLabel').value || 'Calibrated in the app', make_active: true});
+      saved = obj; setDirty(false);
+      status('Saved and in use for game ' + gid + ' (calibration #' + r.calibration.id + '). You can go back to the game now.', 'ok');
+    }catch(e){ status('Not saved: ' + e.errors.join(' '), 'bad'); }
+  });
+
+  function synth(cal){   // an older calibration with outline points only: turn it into something the calibrator can load
+    const o = {pitch_vertices:{}, goal_posts_left_vertices:null, goal_posts_right_vertices:null};
+    Object.entries(cal.vertices).forEach(([k,v]) => { o.pitch_vertices[k] = {x:v[0], y:v[1]}; });
+    if(cal.goal_left) o.goal_posts_left_vertices = cal.goal_left.map(p=>({x:p[0],y:p[1]}));
+    if(cal.goal_right) o.goal_posts_right_vertices = cal.goal_right.map(p=>({x:p[0],y:p[1]}));
+    return o;
+  }
+
+  (async function init(){
+    if(!gid){ $('glTitle').textContent = 'Not linked to a game'; $('glSave').disabled = true; $('glGet').disabled = true; $('glReload').disabled = true;
+      status('Open this page with the "Calibrate pitch" button on a game, so the video frame and the save go to the right place. You can still load your own image and copy the JSON.', 'warn'); return; }
+    $('glBack').href = '/#/game/' + gid;
+    $('glBack').textContent = '\u2190 Back to game';
+    document.querySelector('.gl-brand').href = '/#/game/' + gid;
+    try{
+      game = await api('GET', '/api/games/' + gid);
+    }catch(e){ status(e.errors.join(' '), 'bad'); return; }
+    $('glTitle').textContent = 'Game ' + gid + ': ' + game.title;
+    const active = (game.calibrations||[]).find(c => c.is_active);
+    let secs = null;
+    if(active){
+      const full = await api('GET', '/api/calibrations/' + active.id);
+      try{ saved = full.calibrator_json ? JSON.parse(full.calibrator_json) : synth(full); }catch(e){ saved = synth(full); }
+      const m = /@\s*([\d.]+)s/.exec(saved.source_frame || ''); if(m) secs = Math.round(parseFloat(m[1]));
+    }
+    if(secs === null) secs = (game.game_start_s || 0) + 5;
+    $('glTime').value = fmt(secs);
+    $('glTime').addEventListener('keydown', e => { if(e.key === 'Enter') $('glGet').click(); });
+    if(!game.source_video){ status('This game has no analysis video yet. Choose one on the game page, or load your own image with "Load frame".', 'warn'); return; }
+    await getFrame(true);
+    if(saved) status($('glstatus').textContent + (active ? '  Showing the points saved for this game.' : ''));
+  })();
+})();
+</script>
+
+</body></html>

@@ -41,10 +41,6 @@ def cleanup_gpu_memory():
 # The Core ML package is exported once, next to the .pt, and re-exported if the .pt is newer. If anything fails
 # (not a Mac, coremltools missing, class names differ) the normal PyTorch model is used, so nothing breaks.
 # Set to False to force the PyTorch/CPU path.
-# player/goalkeeper/referee model (in models/objects). YOLO26s, trained without Roboflow augmentation: ~25% faster than
-# v10 (69 vs 92 ms per frame on MPS FP16) with ~95% of v10's on-pitch players found again (game 22, 40 frames).
-# To go back: 'best-v10-1920x1920.pt'
-PLAYERS_MODEL_FILE = 'yolo26-no-augementation.pt'
 USE_COREML_ON_MAC = False
 
 # With a recent PyTorch (2.14+, checked on torch 2.14.1 / ultralytics 8.4.174) the Apple GPU (MPS) runs the 1920x1920
@@ -284,7 +280,7 @@ class CreateDatabase:
         self.is_detection_box_inside_pitch = _timed_inside_pitch_check
 
         # Initialize YOLO models
-        self.PLAYERS_MODEL_PATH = os.path.join('models', 'objects', PLAYERS_MODEL_FILE)
+        self.PLAYERS_MODEL_PATH = os.path.join('models', 'objects', 'best-v10-1920x1920.pt')
         self.BALL_MODEL_PATH = os.path.join('models', 'ball', 'best-v2-1920x1920.pt')
         self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'best-v7-192x192.pt')
         

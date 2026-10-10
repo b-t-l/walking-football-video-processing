@@ -17,7 +17,6 @@ def main():
 
     ############################################################ VARIABLES:
     GAME_ID = 22     # what game (id column) to process ?
-    GAME_SOURCE = 'database'   # where the game details come from: 'excel' = games-logger.xlsx, 'database' = the game logger app (python -m game_logger)
 
     # def what to run: (manually adjust to suit )
     RUN_DETECTIONS = True       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
@@ -55,7 +54,7 @@ def main():
     ############################################################ RUN SCRIPTS:
 
     # - GET GAME DETAILS: details of the game to process from the game logger xls and update necessary variables:
-    game = GetGameData(GAME_ID,GAME_DATA_FILE,source=GAME_SOURCE)
+    game = GetGameData(GAME_ID,GAME_DATA_FILE)
     GAME_RECORD = game.gameRecord()
     print('-------------------------- GAME DETAIL: ')
     for key, value in GAME_RECORD.items():
@@ -66,7 +65,7 @@ def main():
     GAME_PITCH_KEYPOINTS = game.getGamePitchKeyPoints(GAME_RECORD)
 
     # TEAMS:
-    TEAMS_INSTANCE = Teams(source=GAME_SOURCE)
+    TEAMS_INSTANCE = Teams()
     ALL_TEAMS = TEAMS_INSTANCE.get_all_teams()
     TEAMS = TEAMS_INSTANCE.get_playing_teams([GAME_RECORD['team_a'], 
                                                      GAME_RECORD['team_b']])
