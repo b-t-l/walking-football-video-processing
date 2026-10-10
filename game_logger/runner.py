@@ -22,9 +22,10 @@ STEPS = [
     ("match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"),
     ("opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"),
     ("annotation", "Annotated video", "the video with detections drawn on it"),
+    ("team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"),
 ]
 STEP_IDS = [s[0] for s in STEPS]
-NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation"}
+NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation", "team_images"}
 NEEDS_READY = {"detections", "transformations", "annotation"}
 
 POINTER = os.path.join(config.VIDEO_PROCESSING_DIR, "game-logger-current-run.json")

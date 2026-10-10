@@ -1,0 +1,59 @@
+library: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/team-pictures
+team                      train   val  test  total
+Akamas                        0     0     0      0   <- no pictures yet, not used
+Aphrodite Wanderers         110    29    21    160
+BFC Strikers                  0     0     0      0   <- no pictures yet, not used
+Enad Panthers                 0     0     0      0   <- no pictures yet, not used
+Goalkeeper                   67    13     6     86
+Paphos United                 0     0     0      0   <- no pictures yet, not used
+Paphos United Lynx            0     0     0      0   <- no pictures yet, not used
+Paphos United Pumas           0     0     0      0   <- no pictures yet, not used
+Polis Lions                 259    55    39    353
+Referee                      21     3     2     26   <- very few: add more
+West Coast                   86    14     7    107
+Xylafagou                     0     0     0      0   <- no pictures yet, not used
+used in training            543   114    75    732
+prepared in: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/_prepared/team-20261010-222525
+
+training yolo26s-cls.pt on mps: 50 epochs at most, stops early when it stops improving
+
+
+training took 1.3 minutes. best weights: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/runs/team-20261010-222525/weights/best.pt
+
+================ COMPARISON on the same pictures ================
+
+NEW  (team-20261010-yolo26s-cls.pt)
+  val: 114/114 right = 100.0%
+      Aphrodite Wanderers     29/29  
+      Goalkeeper              13/13  
+      Polis Lions             55/55  
+      Referee                  3/3   
+      West Coast              14/14  
+  test: 75/75 right = 100.0%
+      Aphrodite Wanderers     21/21  
+      Goalkeeper               6/6   
+      Polis Lions             39/39  
+      Referee                  2/2   
+      West Coast               7/7   
+
+CURRENT  (best-v7-192x192.pt)
+  val: 100/114 right = 87.7%
+      Aphrodite Wanderers     29/29  
+      Goalkeeper              13/13  
+      Polis Lions             55/55  
+      Referee                  3/3   
+      West Coast               0/14     mistaken for: Akamas x14
+  test: 69/75 right = 92.0%
+      Aphrodite Wanderers     21/21  
+      Goalkeeper               6/6   
+      Polis Lions             39/39  
+      Referee                  2/2   
+      West Coast               1/7      mistaken for: Akamas x4, Polis Lions x2
+
+REMEMBER: the current model has probably seen many of these pictures in training, so its score is flattering.
+
+new weights saved as: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application/models/teams/team-20261010-yolo26s-cls.pt
+to use them: in data/create_database.py change the line
+    self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'best-v7-192x192.pt')
+to  self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261010-yolo26s-cls.pt')
+and add any new team name + colour to assign_team() in team_assigner/team_assigner.py

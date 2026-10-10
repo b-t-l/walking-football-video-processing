@@ -355,7 +355,7 @@ def teams(fr, ctx):
             fig.add_artist(patches.Rectangle((x0 + 0.155 + j * cw + 0.004, y - 0.021), cw - 0.008, 0.042, transform=fig.transFigure,
                                              fc=S.tint(S.BRAND, 1 - min(0.8, 0.15 + v / tot)) if good else S.tint(C_POOR, 1 - min(0.8, 0.1 + 3 * v / tot)) if v else "#f3f4f1", ec="none"))
             fig.text(x0 + 0.155 + j * cw + cw / 2, y, f"{v:,}", fontsize=8.5, ha="center", va="center")
-    _card(fig, (0.62, 0.40, 0.33, 0.45), "Kit colours the model saw", "The typical colour of each team's players.")
+    _card(fig, (0.62, 0.40, 0.33, 0.45), "Team kit colours", "The first kit colour set for each team in the Game Logger.")
     for i, t in enumerate(A["teams"]):
         rgb = K["kit_rgb"].get(t)
         y = 0.70 - i * 0.12

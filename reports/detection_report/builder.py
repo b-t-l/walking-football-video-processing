@@ -9,7 +9,7 @@ import time
 from matplotlib.backends.backend_pdf import PdfPages
 
 from ..match_report import style
-from ..match_report.builder import _kit_rgb
+from ..match_report.builder import _kit_rgb, _team_rgb
 from . import advice, analysis, pages, review
 
 
@@ -17,6 +17,7 @@ class CreateDetectionsReport:
     def __init__(self, db_path, OUTPUT_PATH, TEAMS, GAME_RECORD, DETECTION_FPS, report_file=None, make_review_sheet=True):
         self.db_path, self.out, self.rec, self.fps = db_path, OUTPUT_PATH, GAME_RECORD, DETECTION_FPS
         self.teams = [GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")]
+        self.TEAMS = TEAMS
         self.report_file = report_file
         self.make_review_sheet = make_review_sheet
 
@@ -39,8 +40,13 @@ class CreateDetectionsReport:
         for name, lab in A["team_labels"].items():
             if name != lab:
                 print(f"Note: the game's team '{name}' is called '{lab}' in the detections database; the report uses '{name}'.")
+        kits = [_team_rgb(self.db_path, self.TEAMS, t, A["team_labels"][t]) for t in self.teams]
+        tc = A.get("teams_check")
+        if tc is not None and all(kits):                  # the kit card shows the Game Logger colours too
+            tc["kit_rgb"] = {t: k for t, k in zip(self.teams, kits)}
+            tc["kit_distance"] = math.dist(kits[0], kits[1])
         tips = advice.advise(A)
-        colours = style.team_colours(_kit_rgb(self.db_path, A["team_labels"][self.teams[0]]), _kit_rgb(self.db_path, A["team_labels"][self.teams[1]]))
+        colours = style.team_colours(kits[0], kits[1])
         os.makedirs(self.out, exist_ok=True)
         prefix = self._prefix()
         csv_path = os.path.join(self.out, f"{prefix}_detection-review.csv")

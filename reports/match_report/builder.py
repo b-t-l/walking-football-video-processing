@@ -23,11 +23,25 @@ def _kit_rgb(db_path, team):
     return None
 
 
+def _team_rgb(db_path, TEAMS, game_team, db_label):
+    """The team's colour for charts: the FIRST kit colour set for the team on the Game Logger's Teams page (TEAMS comes from
+    there); only if the team has none is the colour the pipeline stored in the detections database used."""
+    try:
+        kit = TEAMS.get(game_team) if isinstance(TEAMS, dict) else None
+        if kit:
+            r, g, b = [int(v) for v in kit[0]["rgb"]]
+            return (r, g, b)
+    except Exception:
+        pass
+    return _kit_rgb(db_path, db_label)
+
+
 class CreateMatchReport:
     def __init__(self, db_path, OUTPUT_PATH, TEAMS, GAME_RECORD, DETECTION_FPS, report_file=None):
         self.db_path, self.out, self.rec, self.fps = db_path, OUTPUT_PATH, GAME_RECORD, DETECTION_FPS
         a, b = GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")
         self.teams = [a, b]
+        self.TEAMS = TEAMS
         self.report_file = report_file
 
     def run(self):
@@ -46,7 +60,7 @@ class CreateMatchReport:
         for name, lab in labels.items():
             if name != lab:
                 print(f"Note: the game's team '{name}' is called '{lab}' in the detections database; the report uses '{name}'.")
-        colours = style.team_colours(_kit_rgb(self.db_path, labels[self.teams[0]]), _kit_rgb(self.db_path, labels[self.teams[1]]))
+        colours = style.team_colours(_team_rgb(self.db_path, self.TEAMS, self.teams[0], labels[self.teams[0]]), _team_rgb(self.db_path, self.TEAMS, self.teams[1], labels[self.teams[1]]))
         link = rec.get("statistics_output_video")
         link = link if isinstance(link, str) and link.startswith("http") else None
         ctx = pages.Ctx(M, rec, colours, link_base=link, created=time.strftime("%d %b %Y %H:%M"))

@@ -1,6 +1,7 @@
 from data import CreateDatabase
 from video_annotator import CreateVideoAnnotated
 from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport
+from team_images import ExtractTeamImages
 from data import GetGameData
 from view_transformer import CreateViewTransformations
 from track_stitcher import TrackStitcher
@@ -24,6 +25,7 @@ def main():
     RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = True   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
+    RUN_TEAM_IMAGES = False  # save pictures of the players from 10 random frames, sorted by what the team model says (to correct + retrain it)
     RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
     RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
 
@@ -39,14 +41,14 @@ def main():
     import argparse
     _ap = argparse.ArgumentParser()
     _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
     _args, _unknown = _ap.parse_known_args()
     if _args.game is not None:
         GAME_ID = _args.game
     if _args.steps is not None:
         _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation'}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images'}
         if _unknown_steps:
             raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
         RUN_DETECTIONS = 'detections' in _steps
@@ -55,6 +57,7 @@ def main():
         RUN_MATCH_REPORT = 'match_report' in _steps
         RUN_OPPOSITION_REPORT = 'opposition_report' in _steps
         RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
+        RUN_TEAM_IMAGES = 'team_images' in _steps
     TEST_RUN = bool(_args.duration)
     if TEST_RUN:
         DURATION = _args.duration
@@ -128,7 +131,7 @@ def main():
     print(f"Detections database: {DATABASE_FILE}")
 
     # the analysis video must exist before we start (it is found in the game folder by name unless a path is set on the game)
-    if (RUN_DETECTIONS or RUN_ANNOTATION_VIDEO_CREATOR) and not os.path.exists(str(GAME_RECORD['statistics_source_video'])):
+    if (RUN_DETECTIONS or RUN_ANNOTATION_VIDEO_CREATOR or RUN_TEAM_IMAGES) and not os.path.exists(str(GAME_RECORD['statistics_source_video'])):
         raise SystemExit(f"\nSTOPPED: the analysis video was not found: {GAME_RECORD['statistics_source_video']}\n"
                          "Put it in the game's videos folder as <game number>_analysis.mp4, or choose it on the game page in the game logger.\n")
 
@@ -199,6 +202,15 @@ def main():
                                             GAME_RECORD,
                                             DETECTION_FPS)
         opposition.run()
+
+    # - TEAM TRAINING IMAGES: players from 10 random frames saved as pictures, filed by what the team model said
+    if RUN_TEAM_IMAGES == True:
+        TEAM_IMAGES_FOLDER = os.path.join(GAME_PATHS['folder'] if GAME_PATHS else OUTPUT_PATH, 'team-images')
+        ExtractTeamImages(DATABASE_FILE,
+                          GAME_RECORD['statistics_source_video'],
+                          TEAM_IMAGES_FOLDER,
+                          GAME_RECORD,
+                          n_frames=10).run()
 
     # - ANNOTATED VIDEO: run creating an annotated video with player detections, pitch top view etc
     if RUN_ANNOTATION_VIDEO_CREATOR == True:

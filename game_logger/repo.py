@@ -508,9 +508,18 @@ def _game_dict(conn, row, with_detail=True):
     g["date_display"] = display_date(g["date"])
     for field, col in TIME_FIELDS:
         g[field] = format_mmss(g[col])
-    names = {r["team_id"]: r["name"] for r in conn.execute("SELECT team_id, name FROM teams")}
+    teams_by_id = {r["team_id"]: r for r in conn.execute("SELECT team_id, name, kit_colours FROM teams")}
+    names = {k: v["name"] for k, v in teams_by_id.items()}
     g["team_a"] = names.get(g["team_a_id"], "")
     g["team_b"] = names.get(g["team_b_id"], "")
+
+    def _kit(team_id):                    # the team's kit colours as [[r,g,b], ...] (for the colour dots in the games list)
+        t = teams_by_id.get(team_id)
+        try:
+            return [list(c["rgb"]) for c in json.loads((t["kit_colours"] if t else "") or "[]")][:4]
+        except (ValueError, KeyError, TypeError):
+            return []
+    g["team_a_colours"], g["team_b_colours"] = _kit(g["team_a_id"]), _kit(g["team_b_id"])
     g["score"] = f"{g['score_a']}-{g['score_b']}" if g["score_a"] is not None and g["score_b"] is not None else ""
     cal_n = conn.execute("SELECT COUNT(*), COALESCE(SUM(is_active),0) FROM pitch_calibrations WHERE game_id=?",
                          (g["game_id"],)).fetchone()

@@ -106,9 +106,16 @@ async function gamesPage() {
           ${[["", "All"], ["ready", "Ready to process"], ["attention", "Needs attention"], ["processed", "Processed"]].map(([v, l]) => `<option value="${v}" ${listState.status === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="f-arch" ${listState.archived ? "checked" : ""}> Show archived</label></div>
       </div>
-      <table><thead><tr><th>ID</th><th>Date</th><th>Game</th><th>Type</th><th>Score</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Date</th><th>Game</th><th>Kits</th><th>Type</th><th>Score</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table>
       <p class="muted small" id="count"></p>
     </div>`;
+  // the two teams' kit colours as small dots: team A, "v", team B (hover for the team name)
+  const kitDots = g => {
+    const dots = (cols, name) => cols && cols.length
+      ? `<span title="${esc(name)}" style="white-space:nowrap">${cols.map(c => `<span class="swatch" style="background:rgb(${c.join(",")});width:15px;height:15px;margin-right:2px"></span>`).join("")}</span>`
+      : `<span class="muted small" title="${esc(name)}: no kit colours set">-</span>`;
+    return `<span style="white-space:nowrap">${dots(g.team_a_colours, g.team_a)} <span class="muted small">v</span> ${dots(g.team_b_colours, g.team_b)}</span>`;
+  };
   const draw = () => {
     const q = listState.q.trim().toLowerCase();
     const shown = games.filter(g => {
@@ -124,9 +131,10 @@ async function gamesPage() {
       <tr class="click ${g.archived ? "archived" : ""}" data-id="${g.game_id}">
         <td>${g.game_id}</td><td>${esc(g.date_display) || '<span class="muted">-</span>'}</td>
         <td><b>${esc(g.title)}</b>${g.description ? `<div class="muted small">${esc(g.description)}</div>` : ""}</td>
+        <td>${kitDots(g)}</td>
         <td>${esc([g.game_type, g.game_format].filter(Boolean).join(" / "))}</td>
         <td>${esc(g.score) || '<span class="muted">-</span>'}</td><td>${statusChips(g)}</td></tr>`).join("")
-      || `<tr><td colspan="6" class="muted">No games match.</td></tr>`;
+      || `<tr><td colspan="7" class="muted">No games match.</td></tr>`;
     document.getElementById("count").textContent = `${shown.length} of ${games.length} games`;
     document.querySelectorAll("#rows tr[data-id]").forEach(tr => tr.onclick = () => { location.hash = "#/game/" + tr.dataset.id; });
   };
@@ -437,6 +445,7 @@ const RUN_STEPS = [
   ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
   ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
   ["annotation", "Annotated video", "the video with detections drawn on it"],
+  ["team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"],
 ];
 let runTimer = null;
 

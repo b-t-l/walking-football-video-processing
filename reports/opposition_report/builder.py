@@ -8,7 +8,7 @@ import time
 from matplotlib.backends.backend_pdf import PdfPages
 
 from ..match_report import style
-from ..match_report.builder import _kit_rgb
+from ..match_report.builder import _kit_rgb, _team_rgb
 from . import pages, scout
 
 
@@ -20,6 +20,7 @@ class CreateOppositionReport:
     def __init__(self, db_path, OUTPUT_PATH, TEAMS, GAME_RECORD, DETECTION_FPS, report_file=None):
         self.db_path, self.out, self.rec, self.fps = db_path, OUTPUT_PATH, GAME_RECORD, DETECTION_FPS
         self.teams = [GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")]
+        self.TEAMS = TEAMS
         self.report_file = report_file          # (testing) a path to write the first team's report to; the second gets a suffix
 
     def run(self):
@@ -38,7 +39,7 @@ class CreateOppositionReport:
         for name, lab in labels.items():
             if name != lab:
                 print(f"Note: the game's team '{name}' is called '{lab}' in the detections database; the report uses '{name}'.")
-        colours = style.team_colours(_kit_rgb(self.db_path, labels[self.teams[0]]), _kit_rgb(self.db_path, labels[self.teams[1]]))
+        colours = style.team_colours(_team_rgb(self.db_path, self.TEAMS, self.teams[0], labels[self.teams[0]]), _team_rgb(self.db_path, self.TEAMS, self.teams[1], labels[self.teams[1]]))
         link = rec.get("statistics_output_video")
         link = link if isinstance(link, str) and link.startswith("http") else None
         ctx = pages.Ctx(S, rec, colours, link_base=link, created=time.strftime("%d %b %Y %H:%M"))

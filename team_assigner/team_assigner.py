@@ -154,20 +154,18 @@ class TeamAssigner:
         else:
             print("No classification probabilities available.")
 
-        # get the matching color from the teams 
-        if assigned_team == 'Aphrodite Wanderers':
-            assigned_color = (0,0,0)
-        if assigned_team == 'Polis':
-            assigned_color = (40, 200, 75)
-        if assigned_team == 'Akamas':
-            assigned_color = (190, 195, 190)
-        if assigned_team == 'West Coast':
-            assigned_color = (105, 120, 180)
-        if assigned_team == 'Goalkeeper':
+        # the colour comes from the Game Logger: the team's first kit colour (Teams page), stored as BGR for OpenCV.
+        # Goalkeeper and Referee are not teams, so they keep fixed colours. A name that is not one of the teams in this
+        # game (and not Goalkeeper / Referee) stays white.
+        kit = self.TEAM_COLORS.get(assigned_team) if isinstance(self.TEAM_COLORS, dict) else None
+        if kit:
+            r, g, b = [int(v) for v in kit[0]["rgb"]]
+            assigned_color = (b, g, r)
+        elif assigned_team == 'Goalkeeper':
             assigned_color = (232,224,132)
-        if assigned_team == 'Referee':
+        elif assigned_team == 'Referee':
             assigned_color = (96, 136, 250)
-        if assigned_team == 'Unassigned':
+        else:
             assigned_color = (255, 255, 255)
-            
+
         return (assigned_team,assigned_color)
