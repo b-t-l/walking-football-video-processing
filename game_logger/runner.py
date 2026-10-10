@@ -18,7 +18,7 @@ from . import config, db, paths, repo
 STEPS = [
     ("detections", "Detections", "find players, goalkeepers and the ball in every frame (the long one)"),
     ("transformations", "Transformations and statistics", "overhead positions, team assignment, tracks, speed, distance, possession"),
-    ("detection_report", "Detection report", "how well the detections worked (PDF)"),
+    ("detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"),
     ("match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"),
     ("opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"),
     ("annotation", "Annotated video", "the video with detections drawn on it"),

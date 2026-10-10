@@ -1,3 +1,3 @@
-from .create_detection_report import CreateDetectionsReport
+from .detection_report import CreateDetectionsReport
 from .match_report import CreateMatchReport
 from .opposition_report import CreateOppositionReport

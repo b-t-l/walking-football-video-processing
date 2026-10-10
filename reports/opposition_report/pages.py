@@ -77,6 +77,48 @@ def _header(fr, ctx, tm, page_title, intro):
     return fig
 
 
+# ======================================================================================== cover
+def cover(fr, ctx, tm):
+    S_ = ctx.S
+    M, rec = ctx.M, ctx.rec
+    opp = ctx.other(tm)
+    me, op = _t(ctx, tm), _t(ctx, opp)
+    col = ctx.colour[tm]
+    fig = fr.new("", cover=True)
+    fig.add_artist(patches.Rectangle((0, 0), 1, 0.30, transform=fig.transFigure, fc=S.BRAND, ec="none", zorder=0))
+    lax = fig.add_axes([0.06, 0.40, 0.17, 0.5]); lax.imshow(S.logo("green")); lax.axis("off")
+    fig.text(0.30, 0.82, "OPPOSITION REPORT", fontsize=13, color=S.BRAND, fontweight="bold")
+    fig.add_artist(_dotp(fig, 0.312, 0.735, 0.0125, col))
+    fig.text(0.335, 0.735, tm, fontsize=34, fontweight="bold", color=S.INK, va="center")
+    fig.text(0.30, 0.675, _wrap(f"Scouting report for the {opp} coach: how {tm} play, where they are strong and where they can be beaten.", 70), fontsize=12, color=S.MUTED, va="center", linespacing=1.4)
+    title = str(rec.get("title") or " vs ".join(ctx.teams))
+    fig.text(0.30, 0.56, title, fontsize=17, color=S.INK, va="center")
+    score = rec.get("score")
+    score = "" if score is None or str(score).lower() == "nan" else str(score)
+    if score:
+        fig.text(0.86, 0.575, score, fontsize=30, fontweight="bold", color=S.INK, va="center", ha="center")
+    meta = [str(rec.get("date") or ""), f"{rec.get('game_format', '')} · {rec.get('game_type', '')}".strip(" ·"),
+            f"{mmss(M['duration'])} of play analysed"]
+    fig.text(0.30, 0.43, "   |   ".join(m for m in meta if m and m.strip()), fontsize=12, color=S.MUTED)
+    fig.text(0.30, 0.37, "Strong and weak points are measured against the other team in this one game. Players are not named.", fontsize=9.5, color=S.MUTED)
+    a, b = tm.split()[0], opp.split()[0]
+    if a == b:
+        a, b = tm, opp
+
+    def f(v, fmt):
+        return "n/a" if v is None else fmt.format(v)
+    tiles = [("Possession", f"{f(me['share'], '{:.0f}%')} – {f(op['share'], '{:.0f}%')}"),
+             ("Reach the final third", f"{f(me['final_third_pct'], '{:.0f}%')} – {f(op['final_third_pct'], '{:.0f}%')}"),
+             ("Ball won", f"{me['won']} – {op['won']}")]
+    for k, (lab, val) in enumerate(tiles):
+        x = 0.06 + k * 0.31
+        fig.text(x, 0.185, val, fontsize=24, color="white", fontweight="bold")
+        fig.text(x, 0.135, f"{lab}  ({a} – {b})", fontsize=10, color="#d8f0df")
+    fig.text(0.06, 0.06, f"Report created {ctx.created}", fontsize=8.5, color="#d8f0df")
+    fig.text(0.94, 0.06, "Polis Walking Football · match analysis", fontsize=8.5, color="#d8f0df", ha="right")
+    return fig
+
+
 # ======================================================================================== page 1: the brief
 def brief(fr, ctx, tm):
     S_ = ctx.S
@@ -299,4 +341,4 @@ def energy_moments(fr, ctx, tm):
     return fig
 
 
-PAGES = [brief, with_ball, without_ball, energy_moments]
+PAGES = [cover, brief, with_ball, without_ball, energy_moments]

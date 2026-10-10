@@ -76,7 +76,7 @@ On a game page open **Run**:
 1. Tick the stages you want:
    - **Detections** – detect and track players and the ball in the analysis video (the slow step). Saved to `data/0022_detections.db`.
    - **Transformations** – overhead pitch positions, teams, speed, distance, possession, statistics.
-   - **Detection report** – PDF report on the detections.
+   - **Detection report** – scores every detection stage (players, ball, goalkeepers, tracking, teams, positions) out of 100, ranks what to fix first, and lists what to try. It also saves a review sheet (about 24 frames with the detections drawn on) and a CSV: fill the CSV in, run the report again, and it shows measured accuracy.
    - **Match report** – 12-page PDF for the coach and team: possession, territory, team shape, distance, speed, running and key moments (neutral, both teams).
    - **Opposition reports** – two scouting PDFs, one per team, written for the other team's coach: how the team plays, strong and weak points (measured against the other team in the game) and a game plan.
    - **Annotation** – creates the annotated video.

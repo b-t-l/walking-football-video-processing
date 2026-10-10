@@ -55,7 +55,7 @@ def open_folder(game_id: int, conn=Depends(_get_conn)):
 
 # ---------------------------------------------------------------------------------------------- the game's reports
 
-REPORT_KINDS = {".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8"}
+REPORT_KINDS = {".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8"}
 
 
 def _report_dirs(game_id):

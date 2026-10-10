@@ -221,7 +221,7 @@ async function gamePage(id) {
       <pre class="console" id="run-console">Nothing has been run yet.</pre>
       <div class="row spread" style="margin-top:8px"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label>
         <span class="row" style="gap:8px"><select id="run-past" style="width:auto;max-width:360px"><option value="">Earlier runs...</option></select><button type="button" id="run-past-view">Show log</button><button type="button" id="run-back" hidden>Back to current</button></span></div>
-      <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs and text files in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
+      <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs, text files and review-sheet spreadsheets in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
 
   const stage = isNew ? "" : `
     <section class="stage-band" id="stage">
@@ -433,7 +433,7 @@ async function gamePage(id) {
 const RUN_STEPS = [
   ["detections", "Detections", "find players, goalkeepers and the ball in every frame (the long one)"],
   ["transformations", "Transformations and statistics", "overhead positions, teams, tracks, speed, distance, possession"],
-  ["detection_report", "Detection report", "how well the detections worked (PDF)"],
+  ["detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"],
   ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
   ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
   ["annotation", "Annotated video", "the video with detections drawn on it"],
