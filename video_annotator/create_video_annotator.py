@@ -154,15 +154,12 @@ class CreateVideoAnnotated:
         # Calculate start and end frames to process
         start_frame = int(self.START_TIME * self.ORIGINAL_VIDEO_FPS)
         end_frame = int(self.END_TIME * self.ORIGINAL_VIDEO_FPS)
-        '''
-        # end time is either the duration or if a duration of 0 is sent we choose the whole video !
+        # test run: only DURATION seconds from the game start (0 = the whole game)
         if self.DURATION > 0:
-            end_frame = start_frame + int(self.DURATION * self.ORIGINAL_VIDEO_FPS)
-            print(f"🔄 Processing SPECIFIC DURATION to frame {end_frame} based on DURATION={self.DURATION} seconds")
+            end_frame = min(end_frame, start_frame + int(self.DURATION * self.ORIGINAL_VIDEO_FPS))
+            print(f"🔄 TEST RUN: processing only the first {self.DURATION} seconds (frames {start_frame} to {end_frame})")
         else:
-            end_frame = int(self.END_TIME * self.ORIGINAL_VIDEO_FPS)
             print(f"📊 Processing FULL VIDEO frames from {start_frame} to {end_frame}")
-        '''
 
         # Determine the device and configure runtime settings:
         if torch.cuda.is_available():
@@ -481,7 +478,9 @@ class CreateVideoAnnotated:
         
         # Add audio from original video to the final video and save as a new video:
         print("...Adding audio to merged video from source video...")
-        audio_result = os.system(f'ffmpeg -i "{self.OUTPUT_VIDEO_TITLE}" -i "{self.INPUT_VIDEO_TITLE}" -c:v copy -map 0:v:0 -map 1:a:0 "{self.OUTPUT_VIDEO_TITLE_WITH_AUDIO}"')
+        # take the audio from the same moment the video starts (the game start) and stop where the video stops,
+        # so a test run (or a game that starts part-way into the file) gets the matching sound and length
+        audio_result = os.system(f'ffmpeg -i "{self.OUTPUT_VIDEO_TITLE}" -ss {self.START_TIME} -i "{self.INPUT_VIDEO_TITLE}" -c:v copy -map 0:v:0 -map 1:a:0 -shortest "{self.OUTPUT_VIDEO_TITLE_WITH_AUDIO}"')
         
         # If audio addition was successful (return code 0), delete the video without audio
         if audio_result == 0:

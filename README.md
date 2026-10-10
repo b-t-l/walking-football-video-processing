@@ -105,6 +105,14 @@ Outputs go into the game's folder with the standard names. It stops with a clear
 
 ## 7. Improving the team classifier (training your own team model)
 
+**Quick start – retrain the team model (copy and paste this one line into Terminal):**
+
+```
+cd /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application && conda activate walking-football-2026 && python train_team_model.py
+```
+
+Check the picture counts first, without training: add `--dry-run` to the end of that line. The full steps are below.
+
 The team model (`models/teams/`, a small YOLO classification model working on 192x192 pictures) decides which team every player is in. It only knows the teams it was trained on. To add a team or fix mistakes you give it more pictures and retrain it **on this Mac – Roboflow is not needed**.
 
 **The picture library** lives next to the application folder: `video-processing/_team-model-training/team-pictures/<team>/`. There is one folder per team, named exactly as the team is named in the Game Logger, plus `Goalkeeper` and `Referee`. Every picture you ever sort goes in and stays there; over time you just add more. A team needs at least 20 pictures before it is included in training (below that it is skipped and the counts say so).
@@ -140,6 +148,8 @@ conda activate walking-football-2026
 8. **Switch to the new model** when you are happy: in `data/create_database.py` change the `TEAM_MODEL_PATH` line to the new file name, Keep the old weights file so you can switch back. The pipeline currently uses `team-20261010-yolo26s-cls.pt` (the old model was `best-v7-192x192.pt`). Team colours (annotated video and reports) come from the **first kit colour on the Game Logger's Teams page**, so a new team just needs a kit colour there; the team's name in the library folder must match its Game Logger name. Goalkeeper and Referee have fixed colours, and any other name shows white. Colours are stored when detections run, so games processed earlier keep their old colours until you run Detections again.
 
 Other options: `--min-pictures 30` (how many pictures a team needs), `--import-export <folder>` (one-off: copy a Roboflow "Folder Structure" export into the library).
+
+**Which answers the team model may give, and who counts as the goalkeeper.** For each game the model may only answer with the two teams playing (taken from the Game Logger) or Referee, so a team that is not playing, or Goalkeeper, can never be returned (if the model has no pictures for one of the playing teams, the console warns and the answers are not restricted). Goalkeepers are not found by the model or by the detector's class: after the track stitcher, `keeper_zone/` marks any player who spends most of their time inside a goal-end arc as `Goalkeeper` (needs the pitch size from the calibration; margins at the top of `keeper_zone/keeper_zone.py`). That is why the library does not need a Goalkeeper folder. Pictures sorted by the *Team training images* step now only show the allowed answers.
 
 ## 8. Safety net
 

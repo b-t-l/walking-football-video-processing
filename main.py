@@ -5,6 +5,7 @@ from team_images import ExtractTeamImages
 from data import GetGameData
 from view_transformer import CreateViewTransformations
 from track_stitcher import TrackStitcher
+from keeper_zone import KeeperZone
 from speed_and_distance_db_updater import SpeedDistanceUpdater
 from posession_db_updater import BallPosessionUpdater
 from utils import *
@@ -166,6 +167,8 @@ def main():
         db_track_stitcher = TrackStitcher(DATABASE_FILE,
                                           GAME_RECORD)
         db_track_stitcher.run()
+        # goalkeepers = whoever lives in a goal-end arc (by position, not by kit or by the detector's class)
+        KeeperZone(DATABASE_FILE, GAME_RECORD).run()
         db_speed_distance = SpeedDistanceUpdater(DATABASE_FILE,
                                                  GAME_RECORD,
                                                  DURATION)

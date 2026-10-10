@@ -120,6 +120,23 @@ class TeamAssigner:
         return assigned_team, dominant_bgr
         '''
     
+    ########## which model classes may be returned for this game (None = no restriction)
+    def _allowed_classes(self, class_names):
+        if hasattr(self, '_allowed_cache'):
+            return self._allowed_cache
+        allowed = None
+        if isinstance(self.TEAM_COLORS, dict):
+            names = set(class_names.values())
+            playing = [t for t in self.TEAM_COLORS if t in names]
+            if len(playing) >= 2:
+                allowed = set(playing) | {'Referee'}
+                print(f"-- TEAM MODEL: answers restricted to the teams playing {playing} + Referee")
+            else:
+                print(f"-- TEAM MODEL WARNING: the model does not know both playing teams {list(self.TEAM_COLORS)} "
+                      f"(it knows {sorted(names)}), so its answers are NOT restricted. Add pictures for the missing team and retrain.")
+        self._allowed_cache = allowed
+        return allowed
+
     ########################################## assign a team based on the yolo object classification model result
     def assign_team(self, result):
         
@@ -140,6 +157,14 @@ class TeamAssigner:
         if result.probs is not None:
             # Convert probabilities to a Python dictionary
             probs_dict = {class_names[i]: float(prob) for i, prob in enumerate(result.probs.data)}
+
+            # ONLY THE TEAMS PLAYING (+ Referee) ARE POSSIBLE ANSWERS: the game logger says who plays, so a class that is
+            # not one of those two teams (another team's name, Goalkeeper) can never be right for this game. Take the best
+            # of the allowed classes instead. Only done when the model knows BOTH playing teams; otherwise (a team the
+            # model has no pictures of yet, or an old model with other names) nothing is masked and a warning is printed.
+            allowed = self._allowed_classes(class_names)
+            if allowed:
+                probs_dict = {name: p for name, p in probs_dict.items() if name in allowed}
             
             # Get the most probable class and confidence
             top_class = max(probs_dict, key=probs_dict.get)
