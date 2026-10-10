@@ -207,7 +207,7 @@ class CreateVideoAnnotated:
         timestr = time.strftime("%Y%m%d-%H%M%S")
         #self.OUTPUT_VIDEO_TITLE = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-{timestr}.mp4"
         self.OUTPUT_VIDEO_TITLE = GameFiles.report_file(self.WORK_DIR, self.GAME_RECORD, "annotated-no-sound", timestr, "mp4")
-        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = GameFiles.report_file(self.ANNOTATED_PATH, self.GAME_RECORD, "annotated-test" if self.DURATION else "annotated", timestr, "mp4")
+        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = GameFiles.report_file(self.ANNOTATED_PATH, self.GAME_RECORD, "annotated", timestr, "mp4")
 
     ##########################################################
     # Get frame details from database: objects and pitch keypoints

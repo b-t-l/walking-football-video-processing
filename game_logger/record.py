@@ -46,7 +46,7 @@ def build_game_record(conn, game_id):
         "title": g["title"],
         "description": _or_nan(g["description"]),
         "youtube_360_video": _or_nan(g["youtube_360_video"]),
-        "statistics_source_video": _or_nan(g["source_video"]),
+        "statistics_source_video": _or_nan(g["videos"]["analysis"]["path"]),     # the real path: typed on the game, else found in its folder
         "statistics_output_video": _or_nan(g["output_video"]),
         "score": f"{g['score_a']}/{g['score_b']}" if g["score_a"] is not None and g["score_b"] is not None else NAN,
         "team_a": _or_nan(g["team_a"]),

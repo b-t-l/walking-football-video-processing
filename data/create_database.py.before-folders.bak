@@ -225,8 +225,7 @@ class CreateDatabase:
             'lost_tracks': self.BYTE_TRACKER.lost_tracks,
         }
 
-        os.makedirs(self.WORK_DIR, exist_ok=True)
-        with open(os.path.join(self.WORK_DIR, 'tracker_state.pkl'), 'wb') as f:
+        with open('../output/tracker_state.pkl', 'wb') as f:
             pickle.dump(state, f)
         #print("✅ Tracker state saved successfully.")
 
@@ -243,14 +242,10 @@ class CreateDatabase:
                  PITCH_DETECTION_OVERRIDE,
                  GAME_PITCH_KEYPOINTS_WITH_NAMES,
                  GAME_PITCH_KEYPOINTS,
-                 GAME_PITCH_BOUNDARIES,
-                 WORK_DIR=None):
+                 GAME_PITCH_BOUNDARIES):
 
         print("-------------------------------------------------")
         print("Create Database: Processing frame detections")
-
-        # where throw-away files (the tracker state) go: the game's _work folder, or the old shared output folder
-        self.WORK_DIR = WORK_DIR or '../output'
 
         self.INPUT_VIDEO_TITLE = GAME_RECORD['statistics_source_video']
         self.START_TIME = TimeUtils.time_to_seconds(GAME_RECORD['game_start_seconds'])
@@ -1073,7 +1068,7 @@ class CreateDatabase:
                 try:
 
                     # BYTE TRACKER: Restore state before processing the next batch (if needed)
-                    with open(os.path.join(self.WORK_DIR, 'tracker_state.pkl'), 'rb') as f:
+                    with open('../output/tracker_state.pkl', 'rb') as f:
                         state = pickle.load(f)
                         self.BYTE_TRACKER.tracked_tracks = state['tracks']
                         self.BYTE_TRACKER.lost_tracks = state['lost_tracks']

@@ -4,7 +4,7 @@ import os
 
 from fastapi import APIRouter, Depends
 
-from . import config, db, repo
+from . import config, db, paths, repo
 
 router = APIRouter()
 
@@ -13,9 +13,9 @@ MAX_ENTRIES = 3000
 
 
 def stored_form(path):
-    """What gets saved in the game: relative to the application folder when the file is inside it, otherwise the full path."""
-    rel = os.path.relpath(path, config.APP_DIR)
-    return path if rel.startswith("..") else rel
+    """What gets saved in the game: relative to the data folder (the external drive) when the file is inside it, else
+    relative to the application folder when inside that, otherwise the full path."""
+    return paths.stored_form(path)
 
 
 def _get_conn():
@@ -26,13 +26,22 @@ def _get_conn():
         conn.close()
 
 
-def _shortcuts():
+def _shortcuts(game_id=None):
     items = []
 
     def add(label, path):
         if path and os.path.isdir(path) and all(path != i["path"] for i in items):
             items.append({"label": label, "path": path})
 
+    if game_id is not None:
+        gf = paths.game_folder(game_id)
+        if gf:
+            add("This game's folder", gf)
+            add("Its videos", os.path.join(gf, "videos"))
+    root = paths.active_root()
+    if root:
+        add("Data folder", root)
+        add("All games", os.path.join(root, "games"))
     add("input_videos", os.path.join(config.APP_DIR, "input_videos"))
     add("Application folder", config.APP_DIR)
     if os.path.isdir("/Volumes"):
@@ -48,8 +57,14 @@ def _shortcuts():
     return items
 
 
-def _start_folder(conn, current):
+def _start_folder(conn, current, game_id=None):
     cur = repo.resolve_video_path(current) if current else None
+    if not cur and game_id is not None:                         # no file chosen yet: start in this game's videos folder
+        gf = paths.game_folder(game_id)
+        if gf and os.path.isdir(os.path.join(gf, "videos")):
+            return os.path.join(gf, "videos")
+    if cur and os.path.isdir(cur):
+        return cur
     if cur and os.path.isfile(cur):
         return os.path.dirname(cur)
     if cur and os.path.isdir(os.path.dirname(cur)):
@@ -62,9 +77,9 @@ def _start_folder(conn, current):
 
 
 @router.get("/api/browse")
-def browse(path: str = "", all: bool = False, current: str = "", conn=Depends(_get_conn)):
+def browse(path: str = "", all: bool = False, current: str = "", game: int | None = None, conn=Depends(_get_conn)):
     note = None
-    folder = os.path.abspath(os.path.expanduser(path)) if path.strip() else _start_folder(conn, current)
+    folder = os.path.abspath(os.path.expanduser(path)) if path.strip() else _start_folder(conn, current, game)
     if os.path.isfile(folder):
         folder = os.path.dirname(folder)
     while not os.path.isdir(folder) and os.path.dirname(folder) != folder:
@@ -97,7 +112,7 @@ def browse(path: str = "", all: bool = False, current: str = "", conn=Depends(_g
     entries.sort(key=lambda x: (x["type"] != "dir", x["name"].casefold()))
     parent = os.path.dirname(folder)
     return {"path": folder, "parent": parent if parent != folder else None, "entries": entries, "note": note,
-            "shortcuts": _shortcuts()}
+            "shortcuts": _shortcuts(game)}
 
 
 @router.put("/api/video-folder")

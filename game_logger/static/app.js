@@ -11,7 +11,7 @@ const listState = { q: "", type: "", format: "", status: "", archived: false };
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function api(method, url, body) {
-  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json", "X-GL-App": "1" } : { "X-GL-App": "1" }, body: body ? JSON.stringify(body) : undefined });
   let data = null;
   try { data = await res.json(); } catch (e) { /* not json */ }
   if (!res.ok) {
@@ -180,13 +180,20 @@ async function gamePage(id) {
         <div class="c6"><label>Description</label><textarea id="description">${v(g.description)}</textarea></div>
         <div class="c6"><label>Notes <span class="small">(for you; the pipeline ignores these)</span></label><textarea id="notes">${v(g.notes)}</textarea></div>
       </div>`;
-  const vfield = (id, title, help, browseTitle) => `<div class="c12"><label>${title} <span class="small">${help}</span></label>
-          <div class="row" style="flex-wrap:nowrap"><input id="${id}" value="${v(g[id])}"><button type="button" data-browse="${id}" data-title="${esc(browseTitle)}">Browse...</button></div><div id="check-${id}" class="small muted" style="margin-top:4px"></div></div>`;
-  const videoBody = `<p class="muted small" style="margin:12px 0 0">Each game can have three videos. Give a path relative to the application folder (e.g. input_videos/game.mp4) or a full path. All three can be chosen in the player at the top of the page.</p>
+  const slotOf = { edited_video: "edited", source_video: "analysis" };
+  const autoInfo = f => (g.videos && g.videos[slotOf[f]]) || null;
+  const gamePrefix = isNew ? "" : String(g.game_id).padStart(4, "0");
+  const vfield = (id, title, help, browseTitle) => {
+    const a = autoInfo(id), ph = a && a.auto && a.path ? "auto: " + a.shown : "";
+    return `<div class="c12"><label>${title} <span class="small">${help}</span></label>
+          <div class="row" style="flex-wrap:nowrap"><input id="${id}" value="${v(g[id])}" placeholder="${esc(ph)}"><button type="button" data-browse="${id}" data-title="${esc(browseTitle)}">Browse...</button></div><div id="check-${id}" class="small muted" style="margin-top:4px"></div></div>`;
+  };
+  const videoBody = `<div id="folder-box" class="folder-box"></div>
+      <p class="muted small" style="margin:10px 0 0">The analysis and edited videos are found automatically by name in the game's folder (${gamePrefix || "0022"}_analysis.mp4 and ${gamePrefix || "0022"}_edited.mp4). Only fill them in for a video kept somewhere else. All of the game's videos can be played in the player at the top of the page.</p>
       <div class="grid" style="margin-top:10px">
         ${vfield("edited_video", "Edited video", "(the TV-style version that pans to follow the game)", "Choose the edited video")}
         ${vfield("source_video", "Analysis video", "(the video the pipeline uses for detections; game times are measured on this one)", "Choose the analysis video")}
-        ${vfield("output_video", "Annotated video", "(detections drawn on the video; videos the pipeline makes for this game are also found automatically)", "Choose the annotated video")}
+        <div class="c6"><label>Annotated video link <span class="small">(the YouTube link once uploaded; the stats report uses it for chapter links. Annotated video files are found in the game folder.)</span></label><input id="output_video" value="${v(g.output_video)}"></div>
         <div class="c6"><label>YouTube 360 link</label><input id="youtube_360_video" value="${v(g.youtube_360_video)}"></div>
       </div>`;
 
@@ -201,6 +208,20 @@ async function gamePage(id) {
       <h2 style="margin-top:18px">Extra exclusions <span class="muted small">parts of the video the pipeline should skip</span></h2>
       <table><thead><tr><th style="width:140px">From</th><th style="width:140px">To</th><th>Reason</th><th></th></tr></thead><tbody id="ex-rows">${(g.exclusions || []).map(exclusionRow).join("")}</tbody></table>
       <button type="button" id="ex-add" style="margin-top:8px">+ Add exclusion</button>`;
+
+  const savedSteps = (() => { try { return JSON.parse(localStorage.getItem("gl-run-steps") || "null"); } catch (e) { return null; } })() || ["detections", "transformations", "annotation"];
+  const runBody = isNew ? "" : `
+      <div class="run-steps">${RUN_STEPS.map(([k, l, h]) => `<label class="run-step"><input type="checkbox" data-step="${k}" ${savedSteps.includes(k) ? "checked" : ""}> <b>${l}</b> <span class="small muted">${h}</span></label>`).join("")}</div>
+      <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
+        <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
+      <div class="row" style="margin-top:12px;gap:10px"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><span id="run-status" class="small"></span></div>
+      <div id="run-msg"></div>
+      <div class="run-bar" id="run-bar" hidden><div id="run-bar-fill"></div></div>
+      <div class="small muted run-line" id="run-line"></div>
+      <pre class="console" id="run-console">Nothing has been run yet.</pre>
+      <div class="row spread" style="margin-top:8px"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label>
+        <span class="row" style="gap:8px"><select id="run-past" style="width:auto;max-width:360px"><option value="">Earlier runs...</option></select><button type="button" id="run-past-view">Show log</button><button type="button" id="run-back" hidden>Back to current</button></span></div>
+      <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs and text files in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
 
   const stage = isNew ? "" : `
     <section class="stage-band" id="stage">
@@ -239,6 +260,7 @@ async function gamePage(id) {
     </form>
     ${isNew ? `<details class="sec" open><summary><span class="sec-title">Pitch calibration</span><span class="sec-sum">Save the game first, then add its pitch calibration here.</span></summary></details>`
       : `<details class="sec" data-sec="cal" id="cal-card" ${secOpen("cal", false) ? "open" : ""}><summary><span class="sec-title">Pitch calibration</span><span class="sec-sum" id="sum-cal"></span><a class="btn primary sec-act" id="sum-act" href="/calibrator?game=${g.game_id}">Calibrate pitch</a></summary><div class="sec-body" id="cal-body"></div></details>
+         <details class="sec" data-sec="run" id="run-card" ${secOpen("run", false) ? "open" : ""}><summary><span class="sec-title">Run</span><span class="sec-sum" id="sum-run">detections, reports and the annotated video</span></summary><div class="sec-body">${runBody}</div></details>
          <details class="sec" data-sec="rec" ${secOpen("rec", false) ? "open" : ""} id="rec-details"><summary><span class="sec-title">What the pipeline is given</span><span class="sec-sum">the exact record for this game</span></summary><div class="sec-body"><pre class="rec" id="rec">Loading...</pre></div></details>`}`;
 
   const $ = id => document.getElementById(id);
@@ -254,7 +276,7 @@ async function gamePage(id) {
   document.querySelectorAll("details.sec[data-sec]").forEach(d => d.addEventListener("toggle", () => { if (!isNew) secSave(d.dataset.sec, d.open); }));
 
   // one-line summaries shown while a section is collapsed
-  const videoFound = { edited_video: null, source_video: null, output_video: null };
+  const videoFound = { edited_video: null, source_video: null };
   const val = k => ($(k) ? $(k).value.trim() : "");
   const teamName = k => { const el = $(k); return el && el.value ? el.options[el.selectedIndex].text : ""; };
   const refreshSummaries = () => {
@@ -262,11 +284,13 @@ async function gamePage(id) {
     const title = val("title") || [teamName("team_a_id"), teamName("team_b_id")].filter(Boolean).join(" vs ");
     const score = val("score_a") !== "" && val("score_b") !== "" ? `${val("score_a")}-${val("score_b")}` : "";
     set("match", esc([title, score, val("date"), [val("game_type"), val("game_format")].filter(Boolean).join(" / ")].filter(Boolean).join("  ·  ")));
-    const vparts = [["edited_video", "Edited"], ["source_video", "Analysis"], ["output_video", "Annotated"]].map(([f, l]) => {
-      if (!val(f)) return f === "source_video" ? `<span style="color:var(--warn)">no analysis video</span>` : "";
-      const fd = videoFound[f];
+    const vparts = [["edited_video", "Edited"], ["source_video", "Analysis"]].map(([f, l]) => {
+      const ai = autoInfo(f);
+      if (!val(f) && !(ai && ai.path)) return f === "source_video" ? `<span style="color:var(--warn)">no analysis video</span>` : "";
+      const fd = val(f) ? videoFound[f] : (ai ? ai.exists : null);
       return `${l} ` + (fd === false ? `<span style="color:var(--warn)">not found</span>` : fd ? `<span style="color:var(--ok)">found</span>` : "set");
     }).filter(Boolean);
+    if (val("output_video")) vparts.push("YouTube link set");
     set("video", vparts.length ? vparts.join("  ·  ") : `<span style="color:var(--warn)">no videos chosen</span>`);
     const n = document.querySelectorAll("#ex-rows tr").length;
     const t = [val("game_start") || val("game_end") ? `${val("game_start") || "?"} to ${val("game_end") || "?"}` : "", val("half_time_start") ? `half-time ${val("half_time_start")}-${val("half_time_end") || "?"}` : "", n ? `${n} exclusion${n > 1 ? "s" : ""}` : ""].filter(Boolean);
@@ -284,16 +308,25 @@ async function gamePage(id) {
   const upd = () => { $("title").placeholder = names() || "Team A vs Team B"; };
   $("team_a_id").onchange = () => { upd(); refreshSummaries(); }; $("team_b_id").onchange = () => { upd(); refreshSummaries(); }; upd();
 
-  // video path checks (one per video field)
-  const VFIELDS = ["edited_video", "source_video", "output_video"];
+  // video path checks (one per video field), and the game folder box
+  const VFIELDS = ["edited_video", "source_video"];
   const vt = {};
   const checkVideo = async f => {
     const p = $(f).value.trim(); const el = $("check-" + f);
-    if (!p) { el.textContent = ""; videoFound[f] = null; refreshSummaries(); return; }
+    if (!p) {
+      const ai = autoInfo(f);
+      videoFound[f] = null;
+      el.innerHTML = ai && ai.path ? (ai.exists ? `<span style="color:var(--ok)">Found automatically: ${esc(ai.shown)}</span>` : `<span style="color:var(--warn)">Not found: ${esc(ai.shown)}</span>`)
+        : `<span>Not set${g.folder && g.folder.exists ? "" : " (a game folder is needed for it to be found automatically)"}</span>`;
+      refreshSummaries(); return;
+    }
     const r = await api("GET", "/api/check-video?path=" + encodeURIComponent(p));
     if ($(f) === null || $(f).value.trim() !== p) return;
     videoFound[f] = r.exists;
-    el.innerHTML = r.exists ? `<span style="color:var(--ok)">File found</span>` : `<span style="color:var(--warn)">File not found at ${esc(r.resolved)}</span>`;
+    const ai = autoInfo(f);
+    el.innerHTML = r.exists ? `<span style="color:var(--ok)">File found</span>`
+      : `<span style="color:var(--warn)">File not found at ${esc(r.resolved)}</span>` + (ai && ai.typed_missing && ai.typed_missing === p ? ` - using the file in the game folder instead: ${esc(ai.shown)}` : "");
+    if (!r.exists && ai && ai.typed_missing === p) videoFound[f] = true;
     refreshSummaries();
   };
   VFIELDS.forEach(f => {
@@ -304,7 +337,44 @@ async function gamePage(id) {
     });
     checkVideo(f);
   });
-  document.querySelectorAll("[data-browse]").forEach(b => { b.onclick = () => openPicker($(b.dataset.browse), b.dataset.title); });
+  document.querySelectorAll("[data-browse]").forEach(b => { b.onclick = () => openPicker($(b.dataset.browse), b.dataset.title, isNew ? {} : { game: g.game_id }); });
+
+  const renderFolderBox = () => {
+    const box = $("folder-box"); if (!box) return;
+    const root = g.data_root || {}, fo = g.folder || {};
+    let html;
+    if (isNew) html = `<span class="muted">Save the game first, then its folder can be made.</span>`;
+    else if (!root.set) html = `<span style="color:var(--warn)">No data folder is set.</span> <button type="button" class="primary" id="root-choose">Choose data folder...</button> <span class="small muted">where all your games are kept, e.g. /Volumes/LaCie/walking-football (also on the <a href="#/settings">Settings page</a>)</span>`;
+    else if (!root.exists) html = `<span style="color:var(--warn)">The data folder is not connected:</span> <code>${esc(root.path)}</code>. Connect the drive and reload this page, or <button type="button" id="root-choose">choose another folder</button>.`;
+    else if (fo.exists) html = `<b>Game folder:</b> <code>${esc(fo.shown)}</code> <button type="button" id="folder-open">Open in Finder</button>`;
+    else html = `<b>No folder for this game yet.</b> <button type="button" class="primary" id="folder-make">Create game folder</button> <span class="small muted">(makes videos, data and reports folders inside <code>${esc(root.path)}/games</code>)</span>`;
+    box.innerHTML = html;
+    const open = $("folder-open"), make = $("folder-make"), choose = $("root-choose");
+    if (choose) choose.onclick = () => {
+      const tmp = document.createElement("input"); tmp.value = (root.path || "/Volumes/LaCie/walking-football");
+      tmp.addEventListener("input", async () => {
+        try {
+          META = await api("PUT", "/api/settings", { data_root: tmp.value });
+          const fresh = await api("GET", `/api/games/${g.game_id}`);
+          g.folder = fresh.folder; g.videos = fresh.videos; g.data_root = fresh.data_root;
+          toast("Data folder saved: " + tmp.value);
+          renderFolderBox(); VFIELDS.forEach(checkVideo);
+        } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+      });
+      openPicker(tmp, "Choose the data folder (the one that holds your games)", { folder: true });
+    };
+    if (open) open.onclick = async () => { try { await api("POST", `/api/games/${g.game_id}/folder/open`); } catch (e) { toast((e.errors || [e.message]).join(" "), true); } };
+    if (make) make.onclick = async () => {
+      try {
+        const r = await api("POST", `/api/games/${g.game_id}/folder`);
+        const fresh = await api("GET", `/api/games/${g.game_id}`);
+        g.folder = fresh.folder; g.videos = fresh.videos; g.data_root = fresh.data_root;
+        toast("Folder made: " + r.shown + " - put the videos in its videos folder");
+        renderFolderBox(); VFIELDS.forEach(checkVideo);
+      } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+    };
+  };
+  renderFolderBox();
 
   // exclusions
   $("ex-add").onclick = () => { $("ex-rows").insertAdjacentHTML("beforeend", exclusionRow()); markDirty(); refreshSummaries(); };
@@ -355,6 +425,155 @@ async function gamePage(id) {
   $("rec-details").addEventListener("toggle", () => { if ($("rec-details").open) loadRecord(); });
   if ($("rec-details").open) loadRecord();
   renderCalibrations(g);
+  if (!isNew) setupRunPanel(g);
+}
+
+// ---------------------------------------------------------------------------------------------- run panel + console
+
+const RUN_STEPS = [
+  ["detections", "Detections", "find players, goalkeepers and the ball in every frame (the long one)"],
+  ["transformations", "Transformations and statistics", "overhead positions, teams, tracks, speed, distance, possession"],
+  ["detection_report", "Detection report", "how well the detections worked (PDF)"],
+  ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
+  ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
+  ["annotation", "Annotated video", "the video with detections drawn on it"],
+];
+let runTimer = null;
+
+function setupRunPanel(g) {
+  const $ = id => document.getElementById(id);
+  clearInterval(runTimer);
+  const loadReports = async () => {
+    const box = $("rep-list"); if (!box) return;
+    try {
+      const rows = await api("GET", `/api/games/${g.game_id}/reports`);
+      box.innerHTML = rows.length ? rows.map(r => `<div class="rep-row"><a href="/api/games/${g.game_id}/reports/file?name=${encodeURIComponent(r.name)}&test=${r.test}" target="_blank" rel="noopener">${esc(r.name)}</a>${r.test ? ' <span class="chip">test</span>' : ""}
+        <span class="muted">${esc(r.when)} &middot; ${fmtSize(r.size)}</span></div>`).join("") : '<span class="muted">None yet.</span>';
+    } catch (e) { box.innerHTML = '<span class="muted">Not available (is the data folder connected?).</span>'; }
+  };
+  loadReports();
+  if (window.glRepDone) document.removeEventListener("gl-run-finished", window.glRepDone);
+  window.glRepDone = loadReports;
+  document.addEventListener("gl-run-finished", window.glRepDone);
+  let offset = 0, lines = [], cur = "", overwrite = false, shownRun = null, mode = "current", lastStatus = null, busy = false;
+
+  const feed = text => {
+    for (const ch of text) {
+      if (ch === "\n") { lines.push(cur); cur = ""; overwrite = false; }
+      else if (ch === "\r") overwrite = true;
+      else { if (overwrite) { cur = ""; overwrite = false; } cur += ch; }
+    }
+    if (lines.length > 4000) lines.splice(0, lines.length - 4000);
+  };
+  const paint = () => {
+    const pre = $("run-console"); if (!pre) return;
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    pre.textContent = lines.join("\n") + (cur ? "\n" + cur : "");
+    if ($("run-follow").checked && (atBottom || mode === "old")) pre.scrollTop = pre.scrollHeight;
+    // progress: the last "NN%" a progress bar printed, and the latest line
+    const recent = lines.slice(-40).concat([cur]);
+    let pct = null, last = "";
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const t = recent[i].trim();
+      if (!last && t) last = t;
+      if (pct === null) { const m = /(\d{1,3})%\|/.exec(t); if (m) pct = Math.min(100, +m[1]); }
+      if (last && pct !== null) break;
+    }
+    $("run-line").textContent = last.length > 200 ? last.slice(0, 200) + "..." : last;
+    $("run-bar").hidden = pct === null || mode !== "current";
+    if (pct !== null) $("run-bar-fill").style.width = pct + "%";
+    return pct;
+  };
+  const reset = () => { lines = []; cur = ""; overwrite = false; offset = 0; };
+  const parseStart = s => { const d = new Date((s || "").replace(" ", "T")); return isNaN(d) ? null : d; };
+  const elapsed = r => {
+    const a = parseStart(r.started), b = r.ended ? parseStart(r.ended) : new Date();
+    if (!a || !b) return ""; const t = Math.max(0, Math.round((b - a) / 1000));
+    return `${String(Math.floor(t / 3600)).padStart(2, "0")}:${String(Math.floor(t / 60) % 60).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+  };
+  const stepNames = r => (r.steps || []).map(k => (RUN_STEPS.find(x => x[0] === k) || [k, k])[1]).join(", ");
+
+  const showStatus = (r, pct) => {
+    const mine = r && r.game_id === g.game_id, running = r && r.status === "running";
+    $("run-go").disabled = !!running;
+    $("run-stop").disabled = !(running && mine);
+    document.querySelectorAll("[data-step], #run-test, #run-mins").forEach(el => { el.disabled = !!running; });
+    let txt = "", sum = "detections, reports and the annotated video";
+    if (r) {
+      const who = mine ? "" : `game ${r.game_id}: `;
+      if (running) { txt = `<b style="color:var(--ok)">Running</b> ${who}${esc(stepNames(r))}${r.test ? " (test run)" : ""} - ${elapsed(r)}`; sum = `Running${pct != null ? " " + Math.round(pct) + "%" : ""} - ${elapsed(r)}`; }
+      else {
+        const cls = r.status === "finished" ? "var(--ok)" : "var(--bad)";
+        txt = `<b style="color:${cls}">${esc(r.status[0].toUpperCase() + r.status.slice(1))}</b> ${who}${esc(stepNames(r))}${r.test ? " (test run)" : ""} - took ${elapsed(r)}`;
+        sum = mine ? `Last run: ${r.status} ${r.ended || ""}` : sum;
+      }
+      if (!mine) txt += ` <a href="#/game/${r.game_id}">open game ${r.game_id}</a>`;
+    }
+    $("run-status").innerHTML = txt; $("sum-run").textContent = sum;
+  };
+
+  const pollOnce = async () => {
+    if (!$("run-console")) { clearInterval(runTimer); return; }
+    if (busy || mode !== "current") return;
+    busy = true;
+    try {
+      const st = (await api("GET", "/api/run")).run;
+      if (location.hash !== "#/game/" + g.game_id) return;
+      const mine = st && st.game_id === g.game_id;
+      if (mine) {
+        if (shownRun !== st.id) { reset(); shownRun = st.id; }
+        const first = offset === 0 && lines.length === 0;
+        const r = await api("GET", `/api/run/log?offset=${offset}${first ? "&tail=true" : ""}`);
+        if (r.run && r.run.id === st.id) { offset = r.offset; if (r.text) feed(r.text); }
+      }
+      const pct = paint();
+      showStatus(st, pct);
+      if (lastStatus === "running" && st && st.status !== "running") {
+        toast(st.status === "finished" ? "Run finished" : "Run " + st.status, st.status !== "finished");
+        document.dispatchEvent(new Event("gl-run-finished"));
+        loadPast();
+      }
+      lastStatus = st ? st.status : null;
+    } catch (e) { /* the app may be restarting; try again next time */ } finally { busy = false; }
+  };
+
+  const loadPast = async () => {
+    try {
+      const runs = await api("GET", `/api/games/${g.game_id}/runs`);
+      $("run-past").innerHTML = `<option value="">Earlier runs...</option>` + runs.map(r =>
+        `<option value="${esc(r.id)}">${esc(r.started)}  ${r.test ? "[test] " : ""}${esc((r.steps || []).join(", "))}  - ${esc(r.status)}</option>`).join("");
+    } catch (e) { /* ignore */ }
+  };
+
+  $("run-go").onclick = async () => {
+    $("run-msg").innerHTML = "";
+    const steps = [...document.querySelectorAll("[data-step]:checked")].map(el => el.dataset.step);
+    try { localStorage.setItem("gl-run-steps", JSON.stringify(steps)); } catch (e) { /* ignore */ }
+    const body = { steps };
+    if ($("run-test").checked) body.duration_s = Math.max(1, Math.round(parseFloat($("run-mins").value || "2") * 60));
+    try {
+      const r = await api("POST", `/api/games/${g.game_id}/run`, body);
+      mode = "current"; $("run-back").hidden = true; reset(); shownRun = r.run.id; lastStatus = "running";
+      $("run-console").textContent = "Starting..."; $("run-card").open = true;
+      pollOnce();
+    } catch (e) { $("run-msg").innerHTML = notice("bad", "Not started:", e.errors || [e.message]); }
+  };
+  $("run-stop").onclick = async () => {
+    if (!confirm("Stop the run? Whatever the current stage has not finished will be lost; stages that completed are kept.")) return;
+    try { await api("POST", "/api/run/stop"); toast("Stopping..."); pollOnce(); } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+  $("run-past-view").onclick = async () => {
+    const id = $("run-past").value; if (!id) return;
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/runs/${encodeURIComponent(id)}/log?tail=true`);
+      mode = "old"; reset(); feed(r.text); paint(); $("run-back").hidden = false;
+      $("run-line").textContent = "Showing the end of an earlier run's log.";
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+  $("run-back").onclick = () => { mode = "current"; $("run-back").hidden = true; reset(); shownRun = null; $("run-console").textContent = ""; pollOnce(); };
+
+  loadPast(); pollOnce();
+  runTimer = setInterval(pollOnce, 1500);
 }
 
 // ---------------------------------------------------------------------------------------------- video player
@@ -471,9 +690,18 @@ function setupPlayer(id, $, ctx) {
   };
   document.addEventListener("keydown", keyHandler);
 
+  function fillOptions() {
+    const keep = vsel.value;
+    vsel.innerHTML = items.map(i => `<option value="${esc(i.key)}" ${i.exists ? "" : "disabled"}>${esc(i.label)}${i.exists || /(not set|none yet)$/.test(i.label) ? "" : " (file not found)"}</option>`).join("");
+    if (keep && items.some(i => i.key === keep && i.exists)) vsel.value = keep;
+  }
+  if (window.glRunDone) document.removeEventListener("gl-run-finished", window.glRunDone);
+  window.glRunDone = async () => { if (!document.getElementById("pv")) return; try { await refreshList(); fillOptions(); showProxyUi(); } catch (e) { /* ignore */ } };
+  document.addEventListener("gl-run-finished", window.glRunDone);
+
   (async () => {
     await refreshList();
-    vsel.innerHTML = items.map(i => `<option value="${esc(i.key)}" ${i.exists ? "" : "disabled"}>${esc(i.label)}${i.exists || /not set$/.test(i.label) ? "" : " (file not found)"}</option>`).join("");
+    fillOptions();
     const first = items.find(i => i.key === "analysis" && i.exists) || items.find(i => i.exists);
     if (!first) { say("No video to show yet. Choose the videos under Video files and save."); return; }
     vsel.value = first.key;
@@ -553,14 +781,20 @@ async function teamsPage() {
       <label style="margin-top:10px;display:flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="t-active" ${t.is_active ? "checked" : ""}> Active (offered when logging new games)</label>
       <h2 style="margin-top:16px">Kit colours</h2><div id="kcs">${t.kit_colours.map(colourRow).join("")}</div>
       <button type="button" id="kc-add">+ Add colour</button>
-      <div class="row spread" style="margin-top:18px"><div>${t.team_id && !t.games ? `<button class="danger" id="t-del" type="button">Delete team</button>` : ""}</div>
+      <div class="row spread" style="margin-top:18px"><div>${t.team_id ? `<button class="danger" id="t-del" type="button">Delete team</button>` : ""}</div>
       <div class="row"><button type="button" id="t-cancel">Cancel</button><button class="primary" id="t-save" type="button">Save</button></div></div>`;
     dlg.showModal();
     const $ = id => dlg.querySelector("#" + id);
     $("kc-add").onclick = () => $("kcs").insertAdjacentHTML("beforeend", colourRow());
     $("kcs").onclick = e => { if (e.target.classList.contains("kc-del")) e.target.closest(".kc").remove(); };
     $("t-cancel").onclick = () => dlg.close();
-    if ($("t-del")) $("t-del").onclick = async () => { if (confirm("Delete this team?")) { await api("DELETE", `/api/teams/${t.team_id}`); dlg.close(); teamsPage(); } };
+    if ($("t-del")) $("t-del").onclick = async () => {
+      const msg = t.games ? `Delete "${t.name}"?\n\nIt is used in ${t.games} game(s). It will be removed from those games (they keep their scores, videos and everything else, but will show "Teams missing" until you pick a team again). A backup of the database is taken first.`
+                          : `Delete "${t.name}"?`;
+      if (!confirm(msg)) return;
+      try { await api("DELETE", `/api/teams/${t.team_id}${t.games ? "?clear_from_games=true" : ""}`); dlg.close(); toast("Team deleted"); teamsPage(); }
+      catch (e) { $("dlg-msg").innerHTML = notice("bad", "Not deleted:", e.errors); }
+    };
     $("t-save").onclick = async () => {
       const body = { name: $("t-name").value, notes: $("t-notes").value, is_active: $("t-active").checked,
         kit_colours: [...dlg.querySelectorAll(".kc")].map(r => ({ rgb: unhex(r.querySelector(".kc-rgb").value), tolerance: [...r.querySelectorAll(".kc-tol")].map(i => parseInt(i.value, 10) || 0) })) };
@@ -582,11 +816,26 @@ async function settingsPage() {
       <div class="c4"><label>Default running speed (km/h)</label><input id="s-speed" type="number" step="0.5" value="${esc(META.running_speed_km_h)}"></div>
       <div class="c8" style="grid-column:span 8"><label>Pitch Calibrator link</label><input id="s-cal" value="${esc(META.calibrator_url)}"></div>
     </div><div style="margin-top:14px"><button class="primary" id="s-save">Save settings</button></div></div>
+    <div class="card"><h2>Data folder</h2>
+      <p class="small muted" style="margin-top:0">Where your games are kept: one folder per game, with its videos, detections database and reports (normally on the external drive). Change it here if the drive is replaced or mounted under another name.</p>
+      <label>Data folder</label>
+      <div class="row" style="flex-wrap:nowrap"><input id="s-root" value="${esc((META.data_root || {}).path || "")}" placeholder="/Volumes/LaCie/walking-football" ${META.data_root_from_env ? "disabled" : ""}><button type="button" id="s-root-browse" ${META.data_root_from_env ? "disabled" : ""}>Browse...</button></div>
+      <div class="small" style="margin-top:6px">${!(META.data_root || {}).set ? `<span class="muted">Not set - the old shared output folder is used.</span>`
+        : META.data_root.exists ? `<span style="color:var(--ok)">Connected.</span> Database backups are also copied to <code>${esc(META.data_root.path)}/_app-data/game-logger-backups</code>.`
+        : `<span style="color:var(--warn)">Not connected right now.</span>`}${META.data_root_from_env ? " (Set by the WALKING_FOOTBALL_ROOT environment variable.)" : ""}</div>
+      <div style="margin-top:12px"><button class="primary" id="s-root-save">Save data folder</button> <span class="small muted">Leave it empty and save to go back to the old output folder.</span></div></div>
     <div class="card"><h2>Your data</h2>
-      <p class="small">Database file: <code>${esc(META.db_path)}</code><br>Daily backups are kept in: <code>${esc(META.backup_dir)}</code></p>
+      <p class="small">Database file (kept on this computer): <code>${esc(META.db_path)}</code><br>Daily backups are kept in: <code>${esc(META.backup_dir)}</code>${(META.data_root || {}).exists ? ", and a copy on the data folder." : ""}</p>
       <a class="btn" href="/api/export.xlsx">Download everything as a spreadsheet</a>
       <p class="muted small">A read-only copy in the old games-logger.xlsx layout, for safekeeping. Changes made in that file are not read back in.</p></div>
     <p class="muted small">Game logger ${esc(META.version)}</p>`;
+  document.getElementById("s-root-browse").onclick = () => openPicker(document.getElementById("s-root"), "Choose the data folder", { folder: true });
+  document.getElementById("s-root-save").onclick = async () => {
+    try {
+      META = await api("PUT", "/api/settings", { data_root: document.getElementById("s-root").value });
+      toast("Data folder saved"); settingsPage();
+    } catch (e) { document.getElementById("msgs").innerHTML = notice("bad", "Not saved:", e.errors); }
+  };
   document.getElementById("s-save").onclick = async () => {
     try {
       META = await api("PUT", "/api/settings", { running_speed_km_h: document.getElementById("s-speed").value, calibrator_url: document.getElementById("s-cal").value });
@@ -599,16 +848,17 @@ async function settingsPage() {
 
 const fmtSize = n => n > 1e9 ? (n / 1e9).toFixed(1) + " GB" : n > 1e6 ? (n / 1e6).toFixed(0) + " MB" : Math.max(1, Math.round(n / 1e3)) + " KB";
 
-async function openPicker(input, title) {
+async function openPicker(input, title, opts = {}) {
   let dlg = document.getElementById("picker");
   if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "picker"; document.body.appendChild(dlg); }
   let showAll = false;
   const load = async path => {
     try {
-      render(await api("GET", `/api/browse?path=${encodeURIComponent(path || "")}&all=${showAll}&current=${encodeURIComponent(input.value)}`));
+      render(await api("GET", `/api/browse?path=${encodeURIComponent(path || "")}&all=${showAll}&current=${encodeURIComponent(input.value)}` + (opts.game != null ? `&game=${opts.game}` : "")));
     } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
   };
   const render = r => {
+    if (opts.folder) r.entries = r.entries.filter(e => e.type === "dir");
     dlg.innerHTML = `<h2>${esc(title)}</h2>
       <div class="row" style="margin-bottom:8px">${r.shortcuts.map((s, i) => `<button type="button" class="link" data-sc="${i}">${esc(s.label)}</button>`).join("")}</div>
       <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><button type="button" id="pk-up" ${r.parent ? "" : "disabled"}>Up</button>
@@ -616,15 +866,16 @@ async function openPicker(input, title) {
       ${r.note ? notice("warn", "", [r.note]) : ""}
       <div class="pk-list">${r.entries.map((e, i) => `<div class="pk-row" data-i="${i}">
           <span class="pk-name">${e.type === "dir" ? "&#9656; " : ""}${esc(e.name)}</span><span class="muted small">${e.type === "dir" ? "" : fmtSize(e.size)}</span></div>`).join("")
-        || '<div class="muted" style="padding:14px">No folders or video files here.</div>'}</div>
-      <div class="row spread" style="margin-top:12px"><label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)"><input type="checkbox" id="pk-all" ${showAll ? "checked" : ""}> Show all file types</label>
-        <button type="button" id="pk-cancel">Cancel</button></div>`;
+        || '<div class="muted" style="padding:14px">${opts.folder ? "No folders here." : "No folders or video files here."}</div>'}</div>
+      <div class="row spread" style="margin-top:12px"><label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)">${opts.folder ? "" : `<input type="checkbox" id="pk-all" ${showAll ? "checked" : ""}> Show all file types`}</label>
+        <span>${opts.folder ? `<button type="button" class="primary" id="pk-use">Use this folder</button> ` : ""}<button type="button" id="pk-cancel">Cancel</button></span></div>`;
     const $ = id => dlg.querySelector("#" + id);
     dlg.querySelectorAll("[data-sc]").forEach(b => b.onclick = () => load(r.shortcuts[+b.dataset.sc].path));
     $("pk-up").onclick = () => load(r.parent);
     $("pk-go").onclick = () => load($("pk-path").value);
     $("pk-path").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); load($("pk-path").value); } };
-    $("pk-all").onchange = e => { showAll = e.target.checked; load(r.path); };
+    if ($("pk-all")) $("pk-all").onchange = e => { showAll = e.target.checked; load(r.path); };
+    if ($("pk-use")) $("pk-use").onclick = () => { input.value = r.path; input.dispatchEvent(new Event("input", { bubbles: true })); dlg.close(); };
     $("pk-cancel").onclick = () => dlg.close();
     dlg.querySelectorAll(".pk-row").forEach(row => row.onclick = async () => {
       const e = r.entries[+row.dataset.i];

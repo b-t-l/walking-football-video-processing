@@ -53,7 +53,7 @@ class CreateDetectionsReport:
         self.add_title_page(ball_count, goalkeeper_valid_frames, player_valid_frames, team_valid_frames, total_frames)
 
         # Save PDF
-        self.save_pdf(GameFiles.file_name(self.GAME_RECORD, "detection-report", self.REPORT_CREATE_TIME, "pdf"))
+        self.save_pdf(f"game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-detection-report-{self.REPORT_CREATE_TIME}.pdf")
 
         # TIME FOR FULL PROCESS: Calculate elapsed time for entire process:
         end_time = time.time()  # Stop the timer

@@ -129,6 +129,7 @@ def backup(reason="daily", path=None, keep=40):
         name = f"game-logger-{stamp:%Y%m%d}.db"
         dest = os.path.join(config.BACKUP_DIR, name)
         if os.path.exists(dest):
+            _copy_to_drive(dest)          # make sure the drive has today's copy too (it may not have been connected earlier)
             return None
     else:
         name = f"game-logger-{stamp:%Y%m%d-%H%M%S}-{reason}.db"
@@ -148,4 +149,14 @@ def backup(reason="daily", path=None, keep=40):
             os.remove(os.path.join(config.BACKUP_DIR, old))
         except OSError:
             pass
+    _copy_to_drive(dest)
     return dest
+
+
+def _copy_to_drive(local_backup):
+    """Also keep a copy of each backup on the data folder (the external drive) when it is connected."""
+    try:
+        from . import paths
+        return paths.copy_backup_to_drive(local_backup)
+    except Exception:                                        # noqa: BLE001 - a missing drive must never stop the app
+        return None

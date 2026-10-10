@@ -54,9 +54,7 @@ class CreateVideoAnnotated:
                  GAME_RECORD,
                  PITCH_DETECTION_OVERRIDE,
                  GAME_PITCH_KEYPOINTS_WITH_NAMES,
-                 GAME_PITCH_BOUNDARIES,
-                 ANNOTATED_PATH=None,
-                 WORK_DIR=None):
+                 GAME_PITCH_BOUNDARIES):
 
         print("-------------------------------------------------")
         print("CREATE VIDEO ANNOTATED: Creating video from database records")
@@ -73,8 +71,6 @@ class CreateVideoAnnotated:
         self.OBJECT_IMAGES_FOLDER = OBJECT_IMAGES_FOLDER
         self.OUTPUT_VIDEO_TITLE = StringUtils.replace_spaces_with_underscores(GAME_RECORD['title'])
         self.CREATE_VIDEO_OUTPUT_PATH = OUTPUT_PATH
-        self.ANNOTATED_PATH = ANNOTATED_PATH or OUTPUT_PATH      # finished annotated videos go here
-        self.WORK_DIR = WORK_DIR or OUTPUT_PATH                  # throw-away files (chunks, the video without sound) go here
         self.TEAMS = TEAMS
         self.GAME_RECORD = GAME_RECORD
         self.GAME_RUNNING_SPEED = float(GAME_RECORD['running_speed_km_h'])
@@ -206,8 +202,8 @@ class CreateVideoAnnotated:
         # Create the output video file name:
         timestr = time.strftime("%Y%m%d-%H%M%S")
         #self.OUTPUT_VIDEO_TITLE = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-{timestr}.mp4"
-        self.OUTPUT_VIDEO_TITLE = GameFiles.report_file(self.WORK_DIR, self.GAME_RECORD, "annotated-no-sound", timestr, "mp4")
-        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = GameFiles.report_file(self.ANNOTATED_PATH, self.GAME_RECORD, "annotated-test" if self.DURATION else "annotated", timestr, "mp4")
+        self.OUTPUT_VIDEO_TITLE = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-20250308-191703.mp4"
+        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-with-audio-{timestr}.mp4"
 
     ##########################################################
     # Get frame details from database: objects and pitch keypoints
@@ -310,7 +306,7 @@ class CreateVideoAnnotated:
 
         
         # Create and clean temporary directory for chunks
-        temp_dir = os.path.join(self.WORK_DIR, "temp_video_chunks")
+        temp_dir = "../output/temp_video_chunks"
         if os.path.exists(temp_dir):
             # Remove all files in the directory
             for file in os.listdir(temp_dir):
@@ -471,13 +467,12 @@ class CreateVideoAnnotated:
         
         # COMBINE VIDEO CLIPSConcatenate all chunks using ffmpeg directly
         print("\n🔄 Concatenating chunks into 1 video: --------------------------------------------------------")
-        concat_list = os.path.join(self.WORK_DIR, "temp_files.txt")
-        with open(concat_list, "w") as f:
+        with open("temp_files.txt", "w") as f:
             for chunk_file in chunk_files:
                 f.write(f"file '{chunk_file}'\n")
         
         # Use VideoToolbox for concatenation
-        os.system(f'ffmpeg -hwaccel videotoolbox -f concat -safe 0 -i "{concat_list}" -c copy "{self.OUTPUT_VIDEO_TITLE}"')
+        os.system(f'ffmpeg -hwaccel videotoolbox -f concat -safe 0 -i temp_files.txt -c copy "{self.OUTPUT_VIDEO_TITLE}"')
         
         # Add audio from original video to the final video and save as a new video:
         print("...Adding audio to merged video from source video...")

@@ -11,7 +11,7 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from . import config, db, repo
+from . import config, db, paths, repo
 from .calibrator_api import _ffmpeg
 
 router = APIRouter()
@@ -37,45 +37,51 @@ def _need_game(conn, game_id):
     return g
 
 
-SLOTS = (("edited", "edited_video", "Edited video"),
-         ("analysis", "source_video", "Analysis video"),
-         ("annotated", "output_video", "Annotated video"))
-
-
-def _slot_path(g, field):
-    p = repo.resolve_video_path(g[field]) if g.get(field) else None
-    return p if p and os.path.isfile(p) else None
+def _slot_path(g, slot):
+    v = repo.effective_video(g, slot)
+    return v["path"] if v["exists"] else None
 
 
 def _input_path(g):
-    return _slot_path(g, "source_video")
+    return _slot_path(g, "analysis")
 
 
-def _extra_outputs(g):
-    """Other videos the pipeline has made for this game (output/game-id-<id>-*), newest first, apart from the one set as the annotated video."""
-    items = []
+def _annotated_files(g):
+    """Annotated videos for the game, newest first: the game folder's videos/annotated, the 'annotated video' path typed on
+    the game if it is a file, and (older games) the shared output folder."""
+    found = list(paths.annotated_files(g["game_id"]))
+    field = repo.resolve_video_path(g["output_video"]) if g.get("output_video") else None
+    if field and os.path.isfile(field):
+        found.append(field)
     out_dir = os.path.join(config.VIDEO_PROCESSING_DIR, "output")
-    prefix = f"game-id-{g['game_id']}-"
-    annotated = _slot_path(g, "output_video")
     if os.path.isdir(out_dir):
+        marks = (f"game-id-{g['game_id']}-", f"{paths.prefix(g['game_id'])}_annotated")
         for name in os.listdir(out_dir):
-            full = os.path.join(out_dir, name)
-            if name.startswith(prefix) and os.path.splitext(name)[1].lower() in VIDEO_EXT and os.path.isfile(full) \
-                    and not (annotated and os.path.abspath(annotated) == os.path.abspath(full)):
-                items.append(("out:" + name, full))
-    items.sort(key=lambda kp: os.path.getmtime(kp[1]), reverse=True)
-    return items
+            if name.startswith(marks) and os.path.splitext(name)[1].lower() in VIDEO_EXT and os.path.isfile(os.path.join(out_dir, name)):
+                found.append(os.path.join(out_dir, name))
+    unique, seen = [], set()
+    for p in found:
+        k = os.path.abspath(p)
+        if k not in seen:
+            seen.add(k)
+            unique.append(p)
+    return sorted(unique, key=os.path.getmtime, reverse=True)
 
 
 def _all_videos(g):
     """[(key, kind, label, path-or-None)] in the order shown in the droplist."""
     rows = []
-    for key, field, title in SLOTS:
-        p = _slot_path(g, field)
-        name = os.path.basename(g[field]) if g.get(field) else None
-        rows.append((key, key, f"{title}: {name}" if name else f"{title}: not set", p))
-    for key, p in _extra_outputs(g):
-        rows.append((key, "annotated", f"Annotated (pipeline output): {os.path.basename(p)} ({_fmt_time(os.path.getmtime(p))})", p))
+    for slot, title in (("edited", "Edited video"), ("analysis", "Analysis video")):
+        v = repo.effective_video(g, slot)
+        name = os.path.basename(v["path"]) if v["path"] else None
+        rows.append((slot, slot, f"{title}: {name}" if name else f"{title}: not set", v["path"] if v["exists"] else None))
+    ann = _annotated_files(g)
+    if ann:
+        rows.append(("annotated", "annotated", f"Annotated video: {os.path.basename(ann[0])} ({_fmt_time(os.path.getmtime(ann[0]))})", ann[0]))
+        for p in ann[1:]:
+            rows.append(("out:" + os.path.basename(p), "annotated", f"Annotated (earlier): {os.path.basename(p)} ({_fmt_time(os.path.getmtime(p))})", p))
+    else:
+        rows.append(("annotated", "annotated", "Annotated video: none yet", None))
     return rows
 
 

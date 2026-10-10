@@ -1,2 +1,3 @@
-from .create_statistics_report import CreateStatisticsReport,TeamDistanceChart,TrackerSpeedChart,PosessionChart
 from .create_detection_report import CreateDetectionsReport
+from .match_report import CreateMatchReport
+from .opposition_report import CreateOppositionReport

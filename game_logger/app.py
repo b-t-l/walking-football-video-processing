@@ -7,10 +7,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, config, db, repo
+from . import __version__, config, db, paths, repo
 from .files import router as files_router
 from .calibrator_api import router as calibrator_router
 from .video_api import router as video_router
+from .folder_api import router as folder_router
+from .run_api import router as run_router
 from .record import RECORD_KEYS, build_game_record
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -59,6 +61,7 @@ def meta(conn=Depends(get_conn)):
             "game_types": config.GAME_TYPES, "game_formats": config.GAME_FORMATS,
             "running_speed_km_h": repo.default_running_speed(conn), "next_game_id": repo.next_game_id(conn),
             "calibrator_url": repo.get_setting(conn, "calibrator_url", config.CALIBRATOR_URL),
+            "data_root": paths.root_info(), "data_root_from_env": bool((os.environ.get(paths.ENV_ROOT) or "").strip()),
             "point_names": config.PITCH_POINT_NAMES}
 
 
@@ -72,6 +75,11 @@ def put_settings(body: dict, conn=Depends(get_conn)):
         if not 3 <= v <= 40:
             raise repo.ValidationError("Running speed must be between 3 and 40 km/h")
         repo.set_setting(conn, "running_speed_km_h", v)
+    if "data_root" in body:
+        try:
+            paths.set_root(body["data_root"])
+        except paths.GameFolderError as e:
+            raise repo.ValidationError(str(e))
     if "calibrator_url" in body:
         repo.set_setting(conn, "calibrator_url", (body["calibrator_url"] or "").strip())
     return meta(conn)
@@ -93,7 +101,23 @@ def games(archived: bool = False, conn=Depends(get_conn)):
 @app.post("/api/games")
 def create_game(body: dict, conn=Depends(get_conn)):
     g, warnings = repo.save_game(conn, body)
-    return {"game": g, "warnings": warnings}
+    warnings = warnings + _make_folder_for_new_game(g)
+    return {"game": repo.get_game(conn, g["game_id"]), "warnings": warnings}
+
+
+def _make_folder_for_new_game(g):
+    """A new game gets its folder in the data folder straight away. If that cannot be done (drive not connected) the
+    game is still saved and the warning says what to do."""
+    info = paths.root_info()
+    if not info["set"]:
+        return []
+    try:
+        paths.create_game_folder(g)
+    except paths.GameFolderError as e:
+        return [f"The game was saved, but its folder was not made: {e} Press \"Create game folder\" in the Video files section later."]
+    except OSError as e:
+        return [f"The game was saved, but its folder could not be made ({e.strerror}). Press \"Create game folder\" in the Video files section later."]
+    return []
 
 
 @app.get("/api/games/{game_id}")
@@ -193,8 +217,10 @@ def update_team(team_id: int, body: dict, conn=Depends(get_conn)):
 
 
 @app.delete("/api/teams/{team_id}")
-def remove_team(team_id: int, conn=Depends(get_conn)):
-    repo.delete_team(conn, team_id)
+def remove_team(team_id: int, clear_from_games: bool = False, conn=Depends(get_conn)):
+    if clear_from_games:
+        db.backup("before-team-delete")
+    repo.delete_team(conn, team_id, clear_from_games)
     return {"deleted": team_id}
 
 
@@ -222,4 +248,6 @@ def index():
 app.include_router(files_router)
 app.include_router(calibrator_router)
 app.include_router(video_router)
+app.include_router(folder_router)
+app.include_router(run_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

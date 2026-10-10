@@ -31,6 +31,8 @@ def _norm(key, v):
             return repo.parse_goal_text(v)                 # compare the points, not the bracket style
         except ValueError:
             return None                                    # incomplete in the spreadsheet: not carried over
+    if key == "statistics_source_video":                    # the database record carries the real, full path
+        return repo.resolve_video_path(str(v).strip())
     return str(v).strip()
 
 

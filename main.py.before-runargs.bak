@@ -1,6 +1,6 @@
 from data import CreateDatabase
 from video_annotator import CreateVideoAnnotated
-from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport
+from reports import CreateStatisticsReport,CreateDetectionsReport
 from data import GetGameData
 from view_transformer import CreateViewTransformations
 from track_stitcher import TrackStitcher
@@ -24,8 +24,7 @@ def main():
     RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
     RUN_DETECTIONS_REPORT = True   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
-    RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
-    RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
+    RUN_MATCH_REPORT_CREATOR = True  # create match report/statistics
 
     # DETECTION SETTINGS FOR VIDEO:
     PITCH_DETECTION_OVERRIDE = True    # do we want to overide pitch detection and rather temp provide the vertices from our logger file instead ?
@@ -33,31 +32,6 @@ def main():
     BATCH_DURATION = 2  # Process 1 second per batch
     DETECTION_FPS = 12  # Target FPS for detection (eg 12 = every 2nd frame in a 24 FPS video)
     EXCLUDE_TIME_RANGES = []  # Define the time ranges to exclude (in seconds) [(1, 2), (4, 5)]
-
-    # COMMAND-LINE OPTIONS (the game logger's Run panel uses these; with none given, the values above are used as before):
-    #   python main.py --game 22 --steps detections,transformations,annotation --duration 120
-    import argparse
-    _ap = argparse.ArgumentParser()
-    _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation')
-    _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
-    _args, _unknown = _ap.parse_known_args()
-    if _args.game is not None:
-        GAME_ID = _args.game
-    if _args.steps is not None:
-        _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation'}
-        if _unknown_steps:
-            raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
-        RUN_DETECTIONS = 'detections' in _steps
-        RUN_TRANSFORMATIONS = 'transformations' in _steps
-        RUN_DETECTIONS_REPORT = 'detection_report' in _steps
-        RUN_MATCH_REPORT = 'match_report' in _steps
-        RUN_OPPOSITION_REPORT = 'opposition_report' in _steps
-        RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
-    TEST_RUN = bool(_args.duration)
-    if TEST_RUN:
-        DURATION = _args.duration
 
     # INPUT GAME: Set which game to read in from with its details stored in the game-logger.xls
     PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -117,14 +91,6 @@ def main():
         DATABASE_FILE = os.path.join(PARENT_DIR,f"output/game-id-{GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(GAME_RECORD['title'])}.db")
         ANNOTATED_PATH = OUTPUT_PATH
         WORK_DIR = OUTPUT_PATH
-    if TEST_RUN:
-        # a test run never touches the real results: it has its own database, object images and report folder
-        _db_base, _db_ext = os.path.splitext(DATABASE_FILE)
-        DATABASE_FILE = _db_base + '-test' + _db_ext
-        OBJECT_IMAGES_FOLDER = OBJECT_IMAGES_FOLDER.rstrip('/\\') + '-test'
-        OUTPUT_PATH = os.path.join(OUTPUT_PATH, 'test')
-        os.makedirs(OUTPUT_PATH, exist_ok=True)
-        print(f"TEST RUN: only the first {DURATION} seconds from the game start; results go to separate test files")
     print(f"Detections database: {DATABASE_FILE}")
 
     # the analysis video must exist before we start (it is found in the game folder by name unless a path is set on the game)
@@ -182,23 +148,14 @@ def main():
         report.run()
 
 
-    # - MATCH REPORT: 12-page PDF with team statistics for both teams
-    if RUN_MATCH_REPORT == True:
-        report = CreateMatchReport(DATABASE_FILE,
-                                   OUTPUT_PATH,
-                                   TEAMS,
-                                   GAME_RECORD,
-                                   DETECTION_FPS)
+    # - MATCH REPORT: Create report with match statistics
+    if RUN_MATCH_REPORT_CREATOR == True:
+        report = CreateStatisticsReport(DATABASE_FILE,
+                                        OUTPUT_PATH,
+                                        TEAMS,
+                                        GAME_RECORD,
+                                        DETECTION_FPS)
         report.run()
-
-    # - OPPOSITION REPORTS: one scouting PDF per team, written for the other team's coach
-    if RUN_OPPOSITION_REPORT == True:
-        opposition = CreateOppositionReport(DATABASE_FILE,
-                                            OUTPUT_PATH,
-                                            TEAMS,
-                                            GAME_RECORD,
-                                            DETECTION_FPS)
-        opposition.run()
 
     # - ANNOTATED VIDEO: run creating an annotated video with player detections, pitch top view etc
     if RUN_ANNOTATION_VIDEO_CREATOR == True:

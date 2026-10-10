@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from . import config
+from . import config, paths
 from .db import now_iso
 from .timeutil import parse_time, format_mmss
 
@@ -106,10 +106,17 @@ def save_team(conn, data, team_id=None):
     return get_team(conn, team_id)
 
 
-def delete_team(conn, team_id):
+def delete_team(conn, team_id, clear_from_games=False):
+    """Delete a team. If games use it, that is refused unless clear_from_games is set, in which case the team is
+    taken off those games (they keep everything else: scores, title, videos) and show 'Teams missing' until re-picked."""
+    if not get_team(conn, team_id):
+        raise ValidationError("That team does not exist")
     used = conn.execute("SELECT COUNT(*) FROM games WHERE team_a_id=? OR team_b_id=?", (team_id, team_id)).fetchone()[0]
+    if used and not clear_from_games:
+        raise ValidationError(f"This team is used in {used} game(s) - confirm to remove it from those games, or make it inactive instead")
     if used:
-        raise ValidationError(f"This team is used in {used} game(s) - make it inactive instead of deleting it")
+        conn.execute("UPDATE games SET team_a_id = NULL WHERE team_a_id = ?", (team_id,))
+        conn.execute("UPDATE games SET team_b_id = NULL WHERE team_b_id = ?", (team_id,))
     conn.execute("DELETE FROM teams WHERE team_id = ?", (team_id,))
     conn.commit()
 
@@ -275,14 +282,35 @@ def display_date(stored):
 
 
 def resolve_video_path(path):
-    """Where the pipeline will look for a video: as typed, relative to the application folder."""
+    """Where a stored video path really is: relative to the data folder (the external drive) when it is there,
+    otherwise relative to the application folder (how older games were saved)."""
     if not path or not str(path).strip():
         return None
-    p = os.path.expanduser(str(path).strip())
-    return p if os.path.isabs(p) else os.path.normpath(os.path.join(config.APP_DIR, p))
+    return paths.resolve_stored(path)
+
+
+def effective_video(g, slot):
+    """The analysis / edited video for a game: the path typed on the game if there is one, otherwise the file
+    found by name in the game's folder. Returns {"path", "auto", "exists"}."""
+    field = {"analysis": "source_video", "edited": "edited_video"}[slot]
+    explicit = g.get(field)
+    if explicit and str(explicit).strip():
+        p = resolve_video_path(explicit)
+        if p and os.path.isfile(p):
+            return {"path": p, "auto": False, "exists": True}
+        alt = paths.conventional_video(g["game_id"], slot)      # the typed path is wrong or the drive moved: use the game folder's file
+        if alt:
+            return {"path": alt, "auto": True, "exists": True, "typed_missing": explicit}
+        return {"path": p, "auto": False, "exists": False}
+    p = paths.conventional_video(g["game_id"], slot)
+    return {"path": p, "auto": True, "exists": bool(p)}
 
 
 def output_db_path(game_id, title):
+    """The game's detections database: in its folder when it has one, else the old shared output folder."""
+    p = paths.detections_db(game_id)
+    if p and os.path.exists(p):
+        return p
     return os.path.join(config.VIDEO_PROCESSING_DIR, "output", f"game-id-{game_id}-{(title or '').replace(' ', '_')}.db")
 
 
@@ -457,7 +485,11 @@ def get_exclusions(conn, game_id):
 def readiness(g, has_cal, video_found):
     """What is still missing before the pipeline can run this game."""
     missing = []
-    if not g["source_video"]:
+    info = paths.root_info()
+    analysis = (g.get("videos") or {}).get("analysis")
+    if info["set"] and not info["exists"] and not g["source_video"]:
+        missing.append("Data folder not connected")
+    elif analysis is not None and not analysis["path"]:
         missing.append("No analysis video chosen")
     elif video_found is False:
         missing.append("Analysis video not found")
@@ -483,8 +515,16 @@ def _game_dict(conn, row, with_detail=True):
     cal_n = conn.execute("SELECT COUNT(*), COALESCE(SUM(is_active),0) FROM pitch_calibrations WHERE game_id=?",
                          (g["game_id"],)).fetchone()
     g["calibration_count"], g["has_active_calibration"] = cal_n[0], bool(cal_n[1])
-    resolved = resolve_video_path(g["source_video"])
-    g["video_found"] = os.path.exists(resolved) if resolved else None
+    g["videos"] = {}
+    for slot in ("edited", "analysis"):
+        v = effective_video(g, slot)
+        g["videos"][slot] = {"path": v["path"], "shown": paths.shown(v["path"]), "auto": v["auto"], "exists": v["exists"],
+                             "typed_missing": v.get("typed_missing")}
+    a = g["videos"]["analysis"]
+    g["video_found"] = a["exists"] if a["path"] else None
+    folder = paths.game_folder(g["game_id"])
+    g["folder"] = {"path": folder, "shown": paths.shown(folder), "exists": bool(folder)}
+    g["data_root"] = paths.root_info()
     g["processed"] = os.path.exists(output_db_path(g["game_id"], g["title"]))
     g["missing"] = readiness(g, g["has_active_calibration"], g["video_found"])
     g["ready"] = not g["missing"]

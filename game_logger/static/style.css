@@ -116,3 +116,22 @@ details.sec[open] > summary::before { transform: rotate(90deg); }
 .sec-act { flex: none; padding: 5px 12px; font-size: 13px; }
 .sec-body { padding: 2px 18px 18px; border-top: 1px solid var(--line); }
 .sec-tools { display: flex; gap: 14px; justify-content: flex-end; margin: 0 4px 6px; font-size: 13px; }
+
+/* game folder box (Video files section) */
+.folder-box { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--info-soft); font-size: .92rem; }
+.folder-box code { word-break: break-all; }
+
+/* run panel + console */
+.run-steps { display: grid; gap: 6px; margin-top: 12px; }
+.run-step { display: flex; gap: 8px; align-items: baseline; margin: 0; color: var(--text); font-weight: 400; }
+.run-test { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.run-test label { display: inline-flex; gap: 6px; align-items: center; margin: 0; color: var(--text); font-weight: 400; }
+.run-bar { height: 10px; background: var(--line); border-radius: 6px; margin-top: 12px; overflow: hidden; }
+.run-bar > div { height: 100%; width: 0; background: var(--brand); transition: width .4s; }
+.run-line { margin-top: 6px; min-height: 1.2em; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.console { background: #0f1512; color: #d7e3da; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; padding: 10px 12px; border-radius: var(--radius);
+  height: 380px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }
+
+.run-reports { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.rep-row { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; }
+.rep-row a { font-weight: 600; color: var(--brand); }

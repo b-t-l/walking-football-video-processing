@@ -67,9 +67,10 @@ def game_frame(game_id: int, t: float = 5.0, conn=Depends(_get_conn)):
     g = repo.get_game(conn, game_id, with_detail=False)
     if g is None:
         raise HTTPException(404, f"Game {game_id} does not exist")
-    if not g["source_video"]:
+    v = repo.effective_video(g, "analysis")
+    if not v["path"]:
         raise HTTPException(422, "This game has no analysis video yet - choose one on the game page first")
-    path = repo.resolve_video_path(g["source_video"])
+    path = v["path"]
     if not os.path.exists(path):
         raise HTTPException(422, f"The video file was not found at {path}")
     t = max(0.0, t)
