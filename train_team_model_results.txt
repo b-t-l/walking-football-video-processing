@@ -1,55 +1,75 @@
 library: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/team-pictures
 team                      train   val  test  total
-Akamas                        0     0     0      0   <- no pictures yet, not used
+Akamas                       24     2     5     31   <- very few: add more
 Aphrodite Wanderers         110    29    21    160
 BFC Strikers                  0     0     0      0   <- no pictures yet, not used
-Enad Panthers                 0     0     0      0   <- no pictures yet, not used
+Enad Panthers               103    40     4    147
 Goalkeeper                    0     0     0      0   <- no pictures yet, not used
-Paphos United                 0     0     0      0   <- no pictures yet, not used
-Paphos United Lynx            0     0     0      0   <- no pictures yet, not used
-Paphos United Pumas           0     0     0      0   <- no pictures yet, not used
-Polis Lions                 259    55    39    353
-Referee                      21     3     2     26   <- very few: add more
+Paphos United                28     4     4     36   <- very few: add more
+Paphos United Lynx           23    14     5     42   <- very few: add more
+Paphos United Pumas          28     4     4     36   <- very few: add more
+Polis Lions                 297    67    39    403
+Referee                       3     1     3      7   <- only 7: not used in training until it has 20
 West Coast                   86    14     7    107
-Xylafagou                     0     0     0      0   <- no pictures yet, not used
-used in training            476   101    69    646
-prepared in: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/_prepared/team-20261010-231508
+Xylafagou                    18     2    12     32   <- very few: add more
+used in training            717   176   101    994
+prepared in: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/_prepared/team-20261012-111310
 
-training yolo26s-cls.pt on mps: 50 epochs at most, stops early when it stops improving
+training yolo26n-cls.pt on mps: 50 epochs at most, stops early when it stops improving
 
 
-training took 1.4 minutes. best weights: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/runs/team-20261010-231508/weights/best.pt
+training took 1.8 minutes. best weights: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/runs/team-20261012-111310/weights/best.pt
 
 ================ COMPARISON on the same pictures ================
 
-NEW  (team-20261010-yolo26s-cls.pt)
-  val: 101/101 right = 100.0%
+NEW  (team-20261012-yolo26n-cls.pt)
+  val: 176/176 right = 100.0%
+      Akamas                   2/2   
       Aphrodite Wanderers     29/29  
-      Polis Lions             55/55  
-      Referee                  3/3   
+      Enad Panthers           40/40  
+      Paphos United            4/4   
+      Paphos United Lynx      14/14  
+      Paphos United Pumas      4/4   
+      Polis Lions             67/67  
       West Coast              14/14  
-  test: 69/69 right = 100.0%
+      Xylafagou                2/2   
+  test: 100/101 right = 99.0%
+      Akamas                   5/5   
       Aphrodite Wanderers     21/21  
-      Polis Lions             39/39  
-      Referee                  2/2   
+      Enad Panthers            4/4   
+      Paphos United            4/4   
+      Paphos United Lynx       5/5   
+      Paphos United Pumas      4/4   
+      Polis Lions             38/39     mistaken for: Aphrodite Wanderers x1
       West Coast               7/7   
+      Xylafagou               12/12  
 
 CURRENT  (best-v7-192x192.pt)
-  val: 87/101 right = 86.1%
+  val: 96/176 right = 54.5%
+      Akamas                   0/2      mistaken for: Goalkeeper x1, Referee x1
       Aphrodite Wanderers     29/29  
-      Polis Lions             55/55  
-      Referee                  3/3   
+      Enad Panthers            0/40     mistaken for: Referee x16, Aphrodite Wanderers x11, Polis Lions x9, Goalkeeper x4
+      Paphos United            0/4      mistaken for: Akamas x2, Goalkeeper x1, West Coast x1
+      Paphos United Lynx       0/14     mistaken for: Akamas x14
+      Paphos United Pumas      0/4      mistaken for: Akamas x3, Goalkeeper x1
+      Polis Lions             67/67  
       West Coast               0/14     mistaken for: Akamas x14
-  test: 63/69 right = 91.3%
+      Xylafagou                0/2      mistaken for: Aphrodite Wanderers x2
+  test: 61/101 right = 60.4%
+      Akamas                   0/5      mistaken for: Referee x2, Goalkeeper x2, West Coast x1
       Aphrodite Wanderers     21/21  
+      Enad Panthers            0/4      mistaken for: Goalkeeper x1, Polis Lions x1, Referee x1, Aphrodite Wanderers x1
+      Paphos United            0/4      mistaken for: West Coast x3, Akamas x1
+      Paphos United Lynx       0/5      mistaken for: Akamas x4, Aphrodite Wanderers x1
+      Paphos United Pumas      0/4      mistaken for: Goalkeeper x2, Akamas x1, West Coast x1
       Polis Lions             39/39  
-      Referee                  2/2   
       West Coast               1/7      mistaken for: Akamas x4, Polis Lions x2
+      Xylafagou                0/12     mistaken for: Aphrodite Wanderers x12
 
 REMEMBER: the current model has probably seen many of these pictures in training, so its score is flattering.
 
-new weights saved as: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application/models/teams/team-20261010-yolo26s-cls.pt
+new weights saved as: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application/models/teams/team-20261012-yolo26n-cls.pt
 to use them: in data/create_database.py change the line
     self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'best-v7-192x192.pt')
-to  self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261010-yolo26s-cls.pt')
+to  self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261012-yolo26n-cls.pt')
 (team colours come from the first kit colour of the team on the Game Logger Teams page)

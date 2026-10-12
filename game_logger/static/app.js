@@ -446,6 +446,7 @@ const RUN_STEPS = [
   ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
   ["annotation", "Annotated video", "the video with detections drawn on it"],
   ["team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"],
+  ["ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"],
 ];
 let runTimer = null;
 

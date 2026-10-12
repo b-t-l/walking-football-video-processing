@@ -250,4 +250,12 @@ app.include_router(calibrator_router)
 app.include_router(video_router)
 app.include_router(folder_router)
 app.include_router(run_router)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _NoCacheStaticFiles(StaticFiles):
+    """the pages are local and small: always re-check the files, so a code change shows up on the next reload"""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _NoCacheStaticFiles(directory=STATIC_DIR), name="static")
