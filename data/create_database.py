@@ -290,7 +290,7 @@ class CreateDatabase:
 
         # Initialize YOLO models
         self.PLAYERS_MODEL_PATH = os.path.join('models', 'objects', PLAYERS_MODEL_FILE)
-        self.BALL_MODEL_PATH = os.path.join('models', 'ball', 'best-v2-1920x1920.pt')
+        self.BALL_MODEL_PATH = os.path.join('models', 'ball', 'yolo26-2026-10-12.pt')
         self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261012-yolo26n-cls.pt')   # was best-v7-192x192.pt (yolov8n-cls); retrained with train_team_model.py
         
         self.BALL_TRACKER = YOLO(self.BALL_MODEL_PATH)
