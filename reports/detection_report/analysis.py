@@ -225,7 +225,9 @@ def analyse(db_path, record, teams):
 
     # ------------------------------------------------------------------ goalkeepers and referee
     gk = df[((df["class_name"] == "goalkeeper") | (df["team"] == "Goalkeeper")) & df["x"].notna()]
-    gk_in = gk[gk["ins"] == 1]
+    # a goalkeeper stands at the goal line, often just outside the pitch outline: if the Keeper Zone step labelled him (he is in an arc)
+    # he counts whatever the outline says
+    gk_in = gk[(gk["ins"] == 1) | (gk["team"] == "Goalkeeper")]
     left = gk_in[gk_in["x"] < -HALF_L / 2].groupby("frame_id").size().reindex(fr, fill_value=0)
     right = gk_in[gk_in["x"] > HALF_L / 2].groupby("frame_id").size().reindex(fr, fill_value=0)
     any_gk = gk.groupby("frame_id").size().reindex(fr, fill_value=0)

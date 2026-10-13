@@ -489,15 +489,28 @@ class CreateVideoAnnotated:
         else:
             print("Warning: Audio addition failed, keeping video without audio")
 
-        # MEMORY CLEARING: Cleanup
-        '''
-        print("Cleaning up temporary files...")
-        video.close()
-        for chunk_file in chunk_files:
-            os.remove(chunk_file)
-        os.remove("temp_files.txt")
-        os.rmdir(temp_dir)
-        '''
+        # CLEAN UP the throw-away files, but only when the finished video really exists (otherwise keep them to investigate)
+        final_ok = audio_result == 0 and os.path.isfile(self.OUTPUT_VIDEO_TITLE_WITH_AUDIO) \
+            and os.path.getsize(self.OUTPUT_VIDEO_TITLE_WITH_AUDIO) > 0
+        if final_ok:
+            removed = 0
+            for chunk_file in chunk_files:
+                try:
+                    os.remove(chunk_file)
+                    removed += 1
+                except OSError as e:
+                    print(f"Could not delete {chunk_file}: {e}")
+            try:
+                os.remove(concat_list)
+            except OSError:
+                pass
+            try:
+                os.rmdir(temp_dir)                 # only succeeds when empty
+            except OSError:
+                pass
+            print(f"🧹 Annotated video created: deleted {removed} temporary chunk clips")
+        else:
+            print(f"⚠️ The finished video was not created properly, so the temporary chunk clips were kept in {temp_dir}")
 
         # Final garbage collection before exiting
         gc.collect()

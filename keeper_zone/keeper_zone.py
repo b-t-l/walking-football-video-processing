@@ -39,6 +39,7 @@ class KeeperZone:
     ZONE_BEHIND_M = 1.5        # ... and extended this far behind the goal line
     ZONE_SHARE = 0.60          # share of a player's positioned detections that must be in the zone
     ZONE_MIN_SECONDS = 1.5     # and at least this much time in the zone (stops short flickers)
+    PROVISIONAL_BELOW = 0.6    # 'goalkeeper' boxes under this confidence are the extra low-confidence ones (see create_database.KEEPER_MIN_CONF)
     KEEPER_COLOUR = "(232, 224, 132)"   # BGR text, same as the team assigner's fixed Goalkeeper colour
 
     def __init__(self, DATABASE_FILE, GAME_RECORD):
@@ -132,6 +133,13 @@ class KeeperZone:
 
         cur.executemany('UPDATE detected_objects SET team = "Goalkeeper", team_color = ? WHERE _id = ?',
                         [(self.KEEPER_COLOUR, rid) for rid in keeper_rows])
+        # Detections stores 'goalkeeper' boxes from KEEPER_MIN_CONF up while everything else needs PLAYER_CONF. Those extra,
+        # lower-confidence goalkeeper boxes are only wanted when they are a real goalkeeper (in an arc): drop the rest.
+        keep = set(keeper_rows)
+        cur.execute('SELECT _id FROM detected_objects WHERE class_name = "goalkeeper" AND confidence < ?', (self.PROVISIONAL_BELOW,))
+        drop = [(r[0],) for r in cur.fetchall() if r[0] not in keep]
+        cur.executemany('DELETE FROM detected_objects WHERE _id = ?', drop)
+        self.dropped = len(drop)
         conn.commit()
         conn.close()
 
@@ -142,6 +150,8 @@ class KeeperZone:
               f"and >= {min_n} of them")
         print(f"   goalkeeper players found: {len(found)}  ({len(keeper_rows)} detections:  "
               f"left end {by_side['left']},  right end {by_side['right']})")
+        if self.dropped:
+            print(f"   {self.dropped} low-confidence goalkeeper boxes outside the arcs removed (not a goalkeeper)")
         for cls, pid, n, share, side in sorted(found, key=lambda f: -f[2])[:8]:
             print(f"     player_id {pid} (detector class {cls}): {n} detections, {share:.0%} in the {side} arc")
         total_time = time.time() - start_time

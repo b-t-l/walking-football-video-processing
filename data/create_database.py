@@ -45,6 +45,13 @@ def cleanup_gpu_memory():
 # v10 (69 vs 92 ms per frame on MPS FP16) with ~95% of v10's on-pitch players found again (game 22, 40 frames).
 # To go back: 'best-v10-1920x1920.pt'
 PLAYERS_MODEL_FILE = 'yolo26-no-augementation.pt'
+# DETECTION CONFIDENCE for the player model: every class needs PLAYER_CONF, except 'goalkeeper' boxes, which are kept from
+# KEEPER_MIN_CONF up. The goalkeeper stands alone by the goal in a kit nobody else wears, and the model is often unsure of him
+# (confidence split between the player and goalkeeper classes), so the single 0.6 cut threw most of them away (game 22: found in
+# 24% of frames). The extra low-confidence goalkeeper boxes are only provisional: the Keeper Zone step (after Transformations)
+# deletes the ones that are not in a goal-end arc, so they never reach the statistics.
+PLAYER_CONF = 0.6
+KEEPER_MIN_CONF = 0.35
 USE_COREML_ON_MAC = False
 
 # With a recent PyTorch (2.14+, checked on torch 2.14.1 / ultralytics 8.4.174) the Apple GPU (MPS) runs the 1920x1920
@@ -561,7 +568,7 @@ class CreateDatabase:
             with torch.cuda.amp.autocast():
                 player_detections_batch = self.PLAYERS_PREDICTOR.predict(
                     frames_batch,
-                    conf=0.6,
+                    conf=min(PLAYER_CONF, KEEPER_MIN_CONF),
                     device=self.TORCH_DEVICE,
                     **self.HALF_KW,
                     imgsz=(self.PLAYER_MODEL_INPUT_SIZE['height'],self.PLAYER_MODEL_INPUT_SIZE['width']),
@@ -570,7 +577,7 @@ class CreateDatabase:
         else:
             player_detections_batch = self.PLAYERS_PREDICTOR.predict(
                 frames_batch,
-                conf=0.6,
+                conf=min(PLAYER_CONF, KEEPER_MIN_CONF),
                 device=self.TORCH_DEVICE,
                 **self.HALF_KW,
                 imgsz=(self.PLAYER_MODEL_INPUT_SIZE['height'],self.PLAYER_MODEL_INPUT_SIZE['width']),
@@ -586,6 +593,14 @@ class CreateDatabase:
                 
                 # convert to supervision
                 frame_detections_supervision = sv.Detections.from_ultralytics(detection_result)
+                # confidence cut per class: PLAYER_CONF for everything, KEEPER_MIN_CONF for goalkeeper boxes (see the top of this file)
+                if KEEPER_MIN_CONF < PLAYER_CONF and len(frame_detections_supervision):
+                    _conf = np.asarray(frame_detections_supervision.confidence)
+                    _names = np.asarray(frame_detections_supervision.data.get('class_name', []))
+                    _keep = _conf >= PLAYER_CONF
+                    if len(_names) == len(_conf):
+                        _keep = _keep | ((_names == 'goalkeeper') & (_conf >= KEEPER_MIN_CONF))
+                    frame_detections_supervision = frame_detections_supervision[_keep]
                 # Add Tracking of Objects
                 _t0 = time.perf_counter()
                 frame_detections_with_tracking = self.BYTE_TRACKER.update_with_detections(frame_detections_supervision)   
