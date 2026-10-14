@@ -7,6 +7,7 @@ from matplotlib import patches
 
 from . import style as S
 from .metrics import HALF_L, HALF_W, mmss
+from speed_and_distance_db_updater.running_rules import MIN_RUN_SECONDS, MAX_ACCEL_MS2
 
 
 class Ctx:
@@ -572,7 +573,7 @@ def about(fr, ctx):
     ]
     right = [
         ("Speed", f"Fitted from each player's path, in km/h. Readings above 25 km/h are treated as glitches and left out. Bands: under {M['speed']['band_edges'][1]:.0f}, {M['speed']['band_edges'][1]:.0f}–{M['speed']['band_edges'][2]:.0f}, {M['speed']['band_edges'][2]:.0f}–{M['speed']['band_edges'][3]:.0f}, {M['speed']['band_edges'][3]:.0f}–{M['speed']['band_edges'][4]:.0f} and over {M['speed']['band_edges'][4]:.0f} km/h."),
-        ("Running spells", f"A player above {M['running_threshold']:.0f} km/h for at least half a second. The limit is the 'running speed' on the game page."),
+        ("Running spells", f"A player above {M['running_threshold']:.0f} km/h for at least {MIN_RUN_SECONDS:.0f} second, and the speed cannot change faster than a person can (about {MAX_ACCEL_MS2:.0f} m/s²), so a one-off position glitch is not counted. The limit is the 'running speed' on the game page."),
         ("Players", "Players are not named: every figure is for the team as a whole."),
         ("This game", f"{c['frames']:,} frames analysed ({M['detection_fps']:.0f} per second) over {mmss(M['duration'])}. The ball was seen in {c['ball_pct']:.0f}% of them. About {c['players_per_frame'][ctx.teams[0]]:.1f} of {ctx.teams[0]}'s and {c['players_per_frame'][ctx.teams[1]]:.1f} of {ctx.teams[1]}'s 5 players were detected per frame. How reliable the detections are is covered in the separate accuracy report."),
     ]

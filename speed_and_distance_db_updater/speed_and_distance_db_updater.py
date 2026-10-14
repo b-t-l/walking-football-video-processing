@@ -5,6 +5,11 @@ import time
 import numpy as np
 from tqdm import tqdm
 
+try:
+    from .running_rules import limit_acceleration, clip_short_spells, MAX_ACCEL_MS2, MIN_RUN_SECONDS
+except ImportError:                                           # run as a plain script
+    from running_rules import limit_acceleration, clip_short_spells, MAX_ACCEL_MS2, MIN_RUN_SECONDS
+
 
 class SpeedDistanceUpdater:
     """
@@ -22,6 +27,11 @@ class SpeedDistanceUpdater:
         plausibly move (faster than MAX_PLAUSIBLE_SPEED_KMH and at least MIN_JUMP_METRES), the track is split there: no speed or distance is credited across
         the jump and the smoothing never mixes the two sides.
       * Detections outside the pitch get speed 0 and add no distance.
+      * (2026-10, game 27 review) Two physical-plausibility rules, see running_rules.py:
+          - speed cannot change faster than MAX_ACCEL_MS2 (a one-off jump of the foot point, e.g. when the bounding box
+            changes height, otherwise reads as a burst of 15-23 km/h);
+          - speed above the game's running speed is kept only if it is held for MIN_RUN_SECONDS; a shorter burst is
+            cut to just under the running speed, so it can never be counted or drawn as running.
     """
 
     # --- tuning knobs ------------------------------------------------------------------------
@@ -64,6 +74,10 @@ class SpeedDistanceUpdater:
         # detections on every 2nd frame the two differ and speeds would come out wrong)
         self.VIDEO_FPS = float(self.DB_GAME_DETAILS[3])
         self.duration = (0, DURATION * self.DETECTION_FPS)  # Store the duration filter
+        try:
+            self.RUNNING_SPEED_KMH = float(GAME_RECORD.get('running_speed_km_h') or 15.0)
+        except (TypeError, ValueError, AttributeError):
+            self.RUNNING_SPEED_KMH = 15.0
 
     ########## SMOOTHING HELPERS:
     def _segment_starts(self, t, x, y):
@@ -142,6 +156,8 @@ class SpeedDistanceUpdater:
         tracker_ids = self.cursor.fetchall()
 
         total_splits = 0
+        total_limited = 0          # speed readings lowered by the acceleration limit
+        total_short_runs = 0       # spells above the running speed that were too short to count
         updates_batch = []
 
         with tqdm(total=len(tracker_ids), desc="🔄 Processing each player via Tracker ID", unit="tracker") as tracker_pbar:
@@ -174,6 +190,13 @@ class SpeedDistanceUpdater:
 
                     for a, b in zip(bounds[:-1], bounds[1:]):
                         sx, sy, sp = self._smooth_segment(t[a:b], x[a:b], y[a:b])
+                        # FIX 1: no person changes speed faster than MAX_ACCEL_MS2 (acts on the measurable readings only)
+                        ok = np.where(~np.isnan(sp) & (sp <= self.SPEED_GLITCH_CEILING_KMH))[0]
+                        if len(ok) > 1:
+                            limited = limit_acceleration(t[a:b][ok], sp[ok])
+                            total_limited += int(np.sum(limited < sp[ok] - 1e-6))
+                            sp = sp.copy()
+                            sp[ok] = limited
                         prev = None   # previous measurable smoothed point inside this segment
                         for k in range(b - a):
                             i = usable[a + k]
@@ -184,6 +207,13 @@ class SpeedDistanceUpdater:
                             if prev is not None and inside:
                                 dist_inc[i] = math.hypot(sx[k] - sx[prev], sy[k] - sy[prev])
                             prev = k
+
+                # FIX 2: speed above the running speed only counts if it is held for MIN_RUN_SECONDS
+                if len(records) and max(speeds) > self.RUNNING_SPEED_KMH:
+                    t_all = np.array(frames, dtype=float) / self.VIDEO_FPS
+                    speeds_arr, n_short = clip_short_spells(t_all, speeds, self.RUNNING_SPEED_KMH, self.DETECTION_FPS)
+                    speeds = [float(v) for v in speeds_arr]
+                    total_short_runs += n_short
 
                 accumulated_distance = 0.0
                 for i in range(len(records)):
@@ -199,6 +229,8 @@ class SpeedDistanceUpdater:
         if updates_batch:
             self._execute_batch_update(updates_batch)
 
+        print(f"   acceleration limit ({MAX_ACCEL_MS2:.0f} m/s2): {total_limited} speed readings lowered")
+        print(f"   running (> {self.RUNNING_SPEED_KMH:.0f} km/h) must last {MIN_RUN_SECONDS:.1f} s: {total_short_runs} shorter spells cut to just under the limit")
         print(f"   tracks split at absurd jumps (> {self.MIN_JUMP_METRES:.0f} m and > {self.MAX_PLAUSIBLE_SPEED_KMH:.0f} km/h between detections): {total_splits}")
 
         self.conn.commit()

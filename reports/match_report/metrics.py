@@ -12,6 +12,7 @@ import sqlite3
 
 import numpy as np
 import pandas as pd
+from speed_and_distance_db_updater.running_rules import MIN_RUN_SECONDS
 
 PITCH_LENGTH = 36.0
 PITCH_WIDTH = 20.0
@@ -219,8 +220,9 @@ def _heat(x, y, sigma=1.5):
 
 
 def _running_events(pl, pid_col, threshold, det_fps):
-    """Spells where one player holds a speed above the threshold for at least half a second."""
-    min_n = max(2, int(round(det_fps / 2)))
+    """Spells where one player holds a speed above the threshold for at least MIN_RUN_SECONDS (1 s; it was 0.5 s until the
+    game 27 review showed that most half-second 'runs' were position jumps - see speed_and_distance_db_updater/running_rules.py)."""
+    min_n = max(2, int(round(det_fps * MIN_RUN_SECONDS)))
     events = []
     hot = pl[pl["spd"] > threshold].sort_values([pid_col, "t"])
     for (team, pid), grp in hot.groupby(["team", pid_col]):

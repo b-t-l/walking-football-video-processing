@@ -35,10 +35,38 @@ from benchmark_detection_devices import to_tensor
 from compare_player_models import load_pitch_polygon, DEFAULT_DB
 
 WEIGHTS = [
-    ("best-v2 (current)", os.path.join("models", "ball", "best-v2-1920x1920.pt")),
-    ("yolo26 v1", os.path.join("models", "ball", "yolo26-2026-10-09.pt")),
-    ("yolo26 v2 (new)", os.path.join("models", "ball", "yolo26-2026-10-09-v2.pt")),
+    ("yolo26 12 Oct (current)", os.path.join("models", "ball", "yolo26-2026-10-12.pt")),
+    ("yolo26 14 Oct (new)", os.path.join("models", "ball", "yolo26-2026-10-14.pt")),
 ]
+# first = reference ("current"), last = the one being tested. Add --old to also include best-v2 and the 9 Oct models.
+OLD_WEIGHTS = [
+    ("best-v2", os.path.join("models", "ball", "best-v2-1920x1920.pt")),
+    ("yolo26 9 Oct v2", os.path.join("models", "ball", "yolo26-2026-10-09-v2.pt")),
+]
+
+
+class FrameStore:
+    """frames kept as JPEG q98 bytes and decoded on demand (a few hundred 4K frames would not fit in memory as pixels).
+    Every model gets exactly the same decoded pixels, so the comparison stays fair."""
+
+    def __init__(self):
+        self.blobs = []
+        self.shape = None
+
+    def add(self, rgb):
+        import cv2
+        if self.shape is None:
+            self.shape = rgb.shape
+        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 98])
+        self.blobs.append(buf.tobytes())
+
+    def __len__(self):
+        return len(self.blobs)
+
+    def __getitem__(self, i):
+        import cv2
+        a = cv2.imdecode(np.frombuffer(self.blobs[i], np.uint8), cv2.IMREAD_COLOR)
+        return cv2.cvtColor(a, cv2.COLOR_BGR2RGB)
 
 
 def read_frames(video, start, n):
@@ -63,7 +91,6 @@ def run(path, raw, imgsz, device, half, warmup, min_conf):
     import torch
     from ultralytics import YOLO
     model = YOLO(path)
-    tensors = [to_tensor(f, imgsz) for f in raw]
     kw = dict(conf=min_conf, device=device, imgsz=(imgsz, imgsz), verbose=False)
     if half:
         kw["half"] = True
@@ -73,11 +100,12 @@ def run(path, raw, imgsz, device, half, warmup, min_conf):
             torch.mps.synchronize()
 
     for _ in range(warmup):
-        model.predict(torch.stack(tensors[:1]), **kw)
+        model.predict(torch.stack([to_tensor(raw[0], imgsz)]), **kw)
     sync()
-    h, w = raw[0].shape[:2]
+    h, w = raw.shape[:2]
     times, dets = [], []
-    for t in tensors:
+    for k in range(len(raw)):
+        t = to_tensor(raw[k], imgsz)
         t0 = time.perf_counter()
         r = model.predict(torch.stack([t]), **kw)[0]
         sync()
@@ -115,7 +143,7 @@ def top1(det, thr, poly=None):
     return float(c[0]), float(c[1]), float(det["conf"][i])
 
 
-def summarise(dets, thr, poly):
+def summarise(dets, thr, poly, chunk=None):
     n = len(dets)
     boxes_on = boxes_off = frames_off = 0
     for d in dets:
@@ -128,7 +156,9 @@ def summarise(dets, thr, poly):
     tops = [top1(d, thr, poly) for d in dets]
     found = [t for t in tops if t]
     moves = []
-    for a, b in zip(tops[:-1], tops[1:]):
+    for i, (a, b) in enumerate(zip(tops[:-1], tops[1:])):
+        if chunk and (i + 1) % chunk == 0:      # the step from one burst to the next is not a real move
+            continue
         if a and b:
             moves.append(float(np.hypot(a[0] - b[0], a[1] - b[1])))
     return dict(frames_with=len(found), n=n, boxes_on=boxes_on, boxes_off=boxes_off, frames_off=frames_off,
@@ -162,7 +192,7 @@ def save_diff(raw, ref_tops, new_tops, outdir, thr, max_pictures=10):
         if a or b:
             items.append(k)
     step = max(1, len(items) // max_pictures)
-    h, w = raw[0].shape[:2]
+    h, w = raw.shape[:2]
     saved = 0
     for k in items[::step][:max_pictures]:
         img = cv2.cvtColor(raw[k], cv2.COLOR_RGB2BGR)
@@ -184,9 +214,11 @@ def save_diff(raw, ref_tops, new_tops, outdir, thr, max_pictures=10):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--video", default=os.path.join("input_videos", "VID_20181002_211402_00_004.mp4"))
+    ap.add_argument("--video", required=True, help="the game's analysis video, e.g. <game folder>/videos/0027_analysis.mp4")
     ap.add_argument("--start-frame", type=int, default=240)
-    ap.add_argument("--frames", type=int, default=80)
+    ap.add_argument("--frames", type=int, default=80, help="consecutive frames per burst")
+    ap.add_argument("--bursts", type=int, default=1, help="number of bursts, spread evenly across the video from --start-frame (more bursts = a fairer picture of the whole game)")
+    ap.add_argument("--old", action="store_true", help="also run best-v2 and the 9 Oct models")
     ap.add_argument("--imgsz", type=int, default=1920)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--thresholds", default="0.2,0.3,0.4,0.5")
@@ -200,8 +232,20 @@ def main():
     from shapely.geometry import Polygon
     device, half = ("mps", True) if torch.backends.mps.is_available() else ("cpu", False)
     print(f"torch {torch.__version__} | ultralytics {ultralytics.__version__} | device {device} | fp16 {half}")
-    raw = read_frames(args.video, args.start_frame, args.frames)
-    print(f"read {len(raw)} frames from frame {args.start_frame}")
+    import cv2
+    cap = cv2.VideoCapture(args.video)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    if args.bursts > 1:
+        span = max(total - args.start_frame - args.frames, 1)
+        starts = [args.start_frame + int(span * k / (args.bursts - 1)) for k in range(args.bursts)]
+    else:
+        starts = [args.start_frame]
+    raw = FrameStore()
+    for st in starts:
+        for f in read_frames(args.video, st, args.frames):
+            raw.add(f)
+    print(f"read {len(raw)} frames: {args.bursts} burst(s) of {args.frames} from frames {starts}")
     thresholds = [float(x) for x in args.thresholds.split(",")]
     min_conf = min(thresholds + [args.diff_threshold, 0.1])
     min_conf = min(min_conf, 0.1)
@@ -215,7 +259,7 @@ def main():
     global POLY
     POLY = poly
     runs = []
-    for label, path in WEIGHTS:
+    for label, path in (WEIGHTS[:1] + OLD_WEIGHTS + WEIGHTS[1:] if args.old else WEIGHTS):
         print(f"\n=== {label}  ({path}) ===")
         if not os.path.exists(path):
             print("   missing, skipped")
@@ -228,7 +272,7 @@ def main():
             print(f"   FAILED: {type(e).__name__}: {str(e)[:200]}")
             traceback.print_exc(limit=3)
 
-    L = ["", f"SUMMARY  {len(raw)} consecutive frames from frame {args.start_frame}, {device}{' fp16' if half else ''}, "
+    L = ["", f"SUMMARY  {len(raw)} frames ({args.bursts} burst(s) of {args.frames}) of {os.path.basename(args.video)}, {device}{' fp16' if half else ''}, "
              f"{args.imgsz}x{args.imgsz}, ultralytics {ultralytics.__version__}", "",
          "ms/frame: " + ", ".join(f"{r['label']} {r['ms']:.1f}" for r in runs), ""]
     head = (f"{'conf':>5} {'weights':<18}{'ball on':>9}{'boxes':>7}{'boxes':>7}{'frames w/':>10}{'median':>8}{'jumps':>9}   vs current (on-pitch ball): "
@@ -238,7 +282,7 @@ def main():
     for thr in thresholds:
         ref = None
         for r in runs:
-            s = summarise(r["dets"], thr, poly)
+            s = summarise(r["dets"], thr, poly, args.frames if args.bursts > 1 else None)
             move_txt = "n/a" if s["med_move"] is None else "%.0fpx" % s["med_move"]
             line = "%5.2f %-18s%5d/%-3d%7d%7d%10d%8s%5d/%-3d" % (thr, r["label"], s["frames_with"], s["n"], s["boxes_on"],
                                                                s["boxes_off"], s["frames_off"], move_txt, s["jumps"], s["pairs"])
