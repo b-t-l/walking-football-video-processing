@@ -3,6 +3,8 @@ from video_annotator import CreateVideoAnnotated
 from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport
 from team_images import ExtractTeamImages
 from ball_images import ExtractBallImages
+from goal_detection import GoalDetection
+from youtube_description import YoutubeDescription
 from data import GetGameData
 from view_transformer import CreateViewTransformations
 from track_stitcher import TrackStitcher
@@ -28,6 +30,8 @@ def main():
     RUN_DETECTIONS_REPORT = True   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
     RUN_TEAM_IMAGES = False  # save pictures of the players from 10 random frames, sorted by what the team model says (to correct + retrain it)
+    RUN_YOUTUBE_DESCRIPTION = False  # write the .txt to paste into the YouTube description (game details, times, goal estimates); uses the goal detection result
+    RUN_GOAL_DETECTION = False  # find the restarts from the centre spot (a goal is followed by one) and compare with the score; needs Transformations done
     RUN_BALL_IMAGES = False  # save 40 full frames chosen to teach the ball detector where it fails (lost ball, false balls, small, fast...) for Roboflow
     RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
     RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
@@ -44,14 +48,14 @@ def main():
     import argparse
     _ap = argparse.ArgumentParser()
     _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images, goal_detection, youtube_description')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
     _args, _unknown = _ap.parse_known_args()
     if _args.game is not None:
         GAME_ID = _args.game
     if _args.steps is not None:
         _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images', 'ball_images'}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images', 'ball_images', 'goal_detection', 'youtube_description'}
         if _unknown_steps:
             raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
         RUN_DETECTIONS = 'detections' in _steps
@@ -62,6 +66,8 @@ def main():
         RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
         RUN_TEAM_IMAGES = 'team_images' in _steps
         RUN_BALL_IMAGES = 'ball_images' in _steps
+        RUN_GOAL_DETECTION = 'goal_detection' in _steps
+        RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
     TEST_RUN = bool(_args.duration)
     if TEST_RUN:
         DURATION = _args.duration
@@ -226,6 +232,20 @@ def main():
                           BALL_IMAGES_FOLDER,
                           GAME_RECORD,
                           n_frames=40).run()
+
+    # - GOAL DETECTION: restarts from the centre spot (version 0), compared with the score in the game logger
+    if RUN_GOAL_DETECTION == True:
+        GoalDetection(DATABASE_FILE,
+                      OUTPUT_PATH,
+                      GAME_RECORD,
+                      GAME_RECORD['statistics_source_video']).run()
+
+    # - YOUTUBE DESCRIPTION: a .txt for the video description: teams, date, game times and the goal estimates (click-able time stamps)
+    if RUN_YOUTUBE_DESCRIPTION == True:
+        YoutubeDescription(OUTPUT_PATH,
+                           GAME_RECORD,
+                           DATABASE_FILE,
+                           GAME_RECORD['statistics_source_video']).run()
 
     # - ANNOTATED VIDEO: run creating an annotated video with player detections, pitch top view etc
     if RUN_ANNOTATION_VIDEO_CREATOR == True:

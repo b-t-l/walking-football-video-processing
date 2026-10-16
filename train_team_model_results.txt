@@ -8,68 +8,68 @@ Goalkeeper                    0     0     0      0   <- no pictures yet, not use
 Paphos United                28     4     4     36   <- very few: add more
 Paphos United Lynx           23    14     5     42   <- very few: add more
 Paphos United Pumas          28     4     4     36   <- very few: add more
-Polis Lions                 297    67    39    403
+Polis Lions                 318    72    47    437
 Referee                       3     1     3      7   <- only 7: not used in training until it has 20
-West Coast                   86    14     7    107
+West Coast                  178    46    16    240
 Xylafagou                    18     2    12     32   <- very few: add more
-used in training            717   176   101    994
-prepared in: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/_prepared/team-20261012-111310
+used in training            830   213   118   1161
+prepared in: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/_prepared/team-20261015-150011
 
 training yolo26n-cls.pt on mps: 50 epochs at most, stops early when it stops improving
 
 
-training took 1.8 minutes. best weights: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/runs/team-20261012-111310/weights/best.pt
+training took 3.1 minutes. best weights: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/_team-model-training/runs/team-20261015-150011/weights/best.pt
 
 ================ COMPARISON on the same pictures ================
 
-NEW  (team-20261012-yolo26n-cls.pt)
-  val: 176/176 right = 100.0%
+NEW  (team-20261015-yolo26n-cls.pt)
+  val: 213/213 right = 100.0%
       Akamas                   2/2   
       Aphrodite Wanderers     29/29  
       Enad Panthers           40/40  
       Paphos United            4/4   
       Paphos United Lynx      14/14  
       Paphos United Pumas      4/4   
-      Polis Lions             67/67  
-      West Coast              14/14  
+      Polis Lions             72/72  
+      West Coast              46/46  
       Xylafagou                2/2   
-  test: 100/101 right = 99.0%
+  test: 118/118 right = 100.0%
       Akamas                   5/5   
       Aphrodite Wanderers     21/21  
       Enad Panthers            4/4   
       Paphos United            4/4   
       Paphos United Lynx       5/5   
       Paphos United Pumas      4/4   
-      Polis Lions             38/39     mistaken for: Aphrodite Wanderers x1
-      West Coast               7/7   
+      Polis Lions             47/47  
+      West Coast              16/16  
       Xylafagou               12/12  
 
 CURRENT  (best-v7-192x192.pt)
-  val: 96/176 right = 54.5%
+  val: 108/213 right = 50.7%
       Akamas                   0/2      mistaken for: Goalkeeper x1, Referee x1
       Aphrodite Wanderers     29/29  
       Enad Panthers            0/40     mistaken for: Referee x16, Aphrodite Wanderers x11, Polis Lions x9, Goalkeeper x4
       Paphos United            0/4      mistaken for: Akamas x2, Goalkeeper x1, West Coast x1
       Paphos United Lynx       0/14     mistaken for: Akamas x14
       Paphos United Pumas      0/4      mistaken for: Akamas x3, Goalkeeper x1
-      Polis Lions             67/67  
-      West Coast               0/14     mistaken for: Akamas x14
+      Polis Lions             72/72  
+      West Coast               7/46     mistaken for: Akamas x38, Goalkeeper x1
       Xylafagou                0/2      mistaken for: Aphrodite Wanderers x2
-  test: 61/101 right = 60.4%
+  test: 71/118 right = 60.2%
       Akamas                   0/5      mistaken for: Referee x2, Goalkeeper x2, West Coast x1
       Aphrodite Wanderers     21/21  
       Enad Panthers            0/4      mistaken for: Goalkeeper x1, Polis Lions x1, Referee x1, Aphrodite Wanderers x1
       Paphos United            0/4      mistaken for: West Coast x3, Akamas x1
       Paphos United Lynx       0/5      mistaken for: Akamas x4, Aphrodite Wanderers x1
       Paphos United Pumas      0/4      mistaken for: Goalkeeper x2, Akamas x1, West Coast x1
-      Polis Lions             39/39  
-      West Coast               1/7      mistaken for: Akamas x4, Polis Lions x2
+      Polis Lions             47/47  
+      West Coast               3/16     mistaken for: Akamas x8, Polis Lions x2, Goalkeeper x2, Aphrodite Wanderers x1
       Xylafagou                0/12     mistaken for: Aphrodite Wanderers x12
 
 REMEMBER: the current model has probably seen many of these pictures in training, so its score is flattering.
 
-new weights saved as: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application/models/teams/team-20261012-yolo26n-cls.pt
+new weights saved as: /Users/unilever/Desktop/Active-Projects/ai-agents/walking-football/video-processing/walking-football-video-processing-application/models/teams/team-20261015-yolo26n-cls.pt
 to use them: in data/create_database.py change the line
     self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'best-v7-192x192.pt')
-to  self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261012-yolo26n-cls.pt')
+to  self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261015-yolo26n-cls.pt')
 (team colours come from the first kit colour of the team on the Game Logger Teams page)

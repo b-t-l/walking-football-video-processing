@@ -23,10 +23,12 @@ STEPS = [
     ("opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"),
     ("annotation", "Annotated video", "the video with detections drawn on it"),
     ("team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"),
+    ("goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"),
+    ("youtube_description", "YouTube description", "a .txt to paste into the YouTube description box: teams, date, the game's description, the start / half-time / end times and the goal estimates (build-up, goal, restart) as click-able time stamps; uses the Goal detection result (runs it first if there is none)"),
     ("ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, at the pitch edge, big and close to the camera, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"),
 ]
 STEP_IDS = [s[0] for s in STEPS]
-NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation", "team_images", "ball_images"}
+NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
 NEEDS_READY = {"detections", "transformations", "annotation"}
 
 POINTER = os.path.join(config.VIDEO_PROCESSING_DIR, "game-logger-current-run.json")
