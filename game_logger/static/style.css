@@ -66,7 +66,7 @@ tr.archived td { opacity: .55; }
 .pts b { display: block; font-size: 11px; color: var(--muted); font-weight: 500; }
 @media (max-width: 800px) { .pts { grid-template-columns: repeat(2, 1fr); } }
 pre.rec { background: var(--bg); padding: 12px; border-radius: 6px; overflow: auto; font-size: 12px; max-height: 420px; }
-.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: #1d2330; color: #fff; padding: 10px 18px; border-radius: 8px; z-index: 20; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: #1d2330; color: #fff; padding: 10px 18px; border-radius: 8px; z-index: 1100; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
 .toast.bad { background: var(--bad); color: #fff; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: end; }
 .filters > div { min-width: 140px; }
@@ -131,6 +131,13 @@ details.sec[open] > summary::before { transform: rotate(90deg); }
 .run-line { margin-top: 6px; min-height: 1.2em; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console { background: #0f1512; color: #d7e3da; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; padding: 10px 12px; border-radius: var(--radius);
   height: 380px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }
+
+.run-view-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; }
+.run-view-title { font-size: 12px; color: var(--muted, #6b7a70); text-transform: uppercase; letter-spacing: .04em; }
+.run-view.max { position: fixed; inset: 0; z-index: 1000; background: var(--bg); padding: 14px 18px; display: flex; flex-direction: column; margin: 0; }
+.run-view.max .run-view-bar { margin-top: 0; }
+.run-view.max .console { flex: 1 1 auto; height: auto; min-height: 0; font-size: 13px; }
+body.run-max-open { overflow: hidden; }
 
 .run-reports { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .rep-row { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; }

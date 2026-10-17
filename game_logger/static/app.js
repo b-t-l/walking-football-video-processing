@@ -224,10 +224,13 @@ async function gamePage(id) {
         <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
       <div class="row" style="margin-top:12px;gap:10px"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><span id="run-status" class="small"></span></div>
       <div id="run-msg"></div>
-      <div class="run-bar" id="run-bar" hidden><div id="run-bar-fill"></div></div>
-      <div class="small muted run-line" id="run-line"></div>
-      <pre class="console" id="run-console">Nothing has been run yet.</pre>
-      <div class="row spread" style="margin-top:8px"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label>
+      <div class="run-view" id="run-view">
+        <div class="run-view-bar"><span class="row" style="gap:14px;align-items:center"><span class="run-view-title">Run output</span><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label></span><span class="row" style="gap:8px"><button type="button" class="danger" id="run-stop2" disabled>Stop</button><button type="button" id="run-max" title="Fill the browser window with the run output (Esc to go back)">Full window</button></span></div>
+        <div class="run-bar" id="run-bar" hidden><div id="run-bar-fill"></div></div>
+        <div class="small muted run-line" id="run-line"></div>
+        <pre class="console" id="run-console">Nothing has been run yet.</pre>
+      </div>
+      <div class="row spread" style="margin-top:8px"><span class="small muted">Esc closes the full window view.</span>
         <span class="row" style="gap:8px"><select id="run-past" style="width:auto;max-width:360px"><option value="">Earlier runs...</option></select><button type="button" id="run-past-view">Show log</button><button type="button" id="run-back" hidden>Back to current</button></span></div>
       <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs, text files and review-sheet spreadsheets in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
 
@@ -583,6 +586,24 @@ function setupRunPanel(g) {
     } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
   };
   $("run-back").onclick = () => { mode = "current"; $("run-back").hidden = true; reset(); shownRun = null; $("run-console").textContent = ""; pollOnce(); };
+
+  // full window view of the run output (inside the browser window, not the screen's full screen); Esc or the button goes back
+  const maxView = on => {
+    const v = $("run-view"); if (!v) return;
+    v.classList.toggle("max", on); document.body.classList.toggle("run-max-open", on);
+    $("run-max").textContent = on ? "Close full window" : "Full window";
+    const pre = $("run-console"); if (on || $("run-follow").checked) pre.scrollTop = pre.scrollHeight;
+  };
+  $("run-max").onclick = () => maxView(!$("run-view").classList.contains("max"));
+  $("run-stop2").onclick = () => $("run-stop").click();
+  new MutationObserver(() => { const b = $("run-stop2"); if (b) b.disabled = $("run-stop").disabled; })
+    .observe($("run-stop"), { attributes: true, attributeFilter: ["disabled"] });
+  $("run-stop2").disabled = $("run-stop").disabled;
+  const escMax = e => {
+    if (!$("run-view")) { document.removeEventListener("keydown", escMax); document.body.classList.remove("run-max-open"); return; }
+    if (e.key === "Escape" && $("run-view").classList.contains("max")) maxView(false);
+  };
+  document.addEventListener("keydown", escMax);
 
   loadPast(); pollOnce();
   runTimer = setInterval(pollOnce, 1500);
