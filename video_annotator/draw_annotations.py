@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 import ast
@@ -20,6 +21,40 @@ REF_FRAME_HEIGHT = 2160
 REF_PANEL_TOP = 1300
 
 
+HEADER_TEXT_HEIGHT_FRAC = (0.026, 0.020, 0.016)   # capital-letter height of: 'Video Analysis', teams + score, date + description (share of video height)
+TOP_STRIP_FRAC = 0.15             # solid black strip across the top of the video behind the logo and text (share of video height; 0 = none)
+TOP_STRIP_FEATHER_FRAC = 0.0    # ... and how softly it fades into the video below it
+HEADER_HEADING_GAP = 0.30          # gap between 'Video Analysis' and the line under it, as a share of the heading's letter height (smaller = tighter)
+HEADER_MAX_WIDTH_FRAC = 0.36      # the text block is at most this wide (share of video width); the description wraps to 2 lines
+HEADER_DESCRIPTION_LINES = 2
+TOP_MASK_FEATHER_FRAC = 0.10      # the black cover above the netting fades out over this share of the video height (0 = hard edge)
+_mask_cache = {}
+LOGO_FILE = "polis_logo.png"      # in the images folder; set to None to leave the logo off
+LOGO_HEIGHT_FRAC = 0.08           # logo height as a share of the video height (about the height of the three text lines beside it)
+LOGO_MARGIN_FRAC = 0.018          # gap from the top, as a share of the video height (only used when there is no black strip)
+LOGO_TEXT_GAP_FRAC = 0.028        # gap between the logo and the header text
+LOGO_LEFT_FRAC = 0.032            # gap from the left edge to the logo (the header text moves with it), as a share of the video height
+_logo_cache = {}
+
+GOAL_BALL_D = 0.40                       # diameter of the football on the goal marker, as a share of the timeline strip's height
+GOAL_FLAG_W, GOAL_FLAG_H = 0.34, 0.28   # goal flag on the timeline: width and height as a share of the timeline strip's height
+SHAPE_DOT_ALPHA = 0.50   # how solid the dotted white circles on the overhead map are (1 = fully solid)
+
+
+def dotted_points(pts, gap):
+    """Points spaced `gap` pixels apart along the polyline `pts` (N x 2), measured along the line, so a circle gets even dots."""
+    pts = np.asarray(pts, dtype=np.float64)
+    if len(pts) < 2:
+        return []
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    if cum[-1] <= 0:
+        return []
+    n = max(2, int(cum[-1] // gap) + 1)
+    d = np.linspace(0.0, cum[-1], n)
+    return list(zip(np.interp(d, cum, pts[:, 0]), np.interp(d, cum, pts[:, 1])))
+
+
 def frame_layout_scale(frame):
     """Scale factor that fits the 4K overlay layout inside this frame."""
     height, width = frame.shape[:2]
@@ -31,7 +66,7 @@ def frame_layout_scale(frame):
 PITCH_DOT_RADIUS = 6            # corner dots (was 15)
 PITCH_DOT_ALPHA = 0.35
 PITCH_LINE_THICKNESS = 2
-PITCH_LINE_ALPHA = 0.18         # pitch outline, lower = more transparent
+PITCH_LINE_ALPHA = 0.30         # pitch outline, lower = more transparent (was 0.18)
 BOX_ALPHA_NORMAL = 0.12         # ordinary player box (team colour): barely there
 BOX_ALPHA_ORANGE = 0.75         # 10-15 km/h
 BOX_THICKNESS_RUNNING = 3       # red (>15 km/h) is fully opaque
@@ -119,8 +154,62 @@ def compute_top_mask_polygon(frame, top_mask_frac):
     return np.array(poly, dtype=np.int32)
 
 
+def top_mask_keep(frame, polygon, feather_frac=None):
+    """Per-pixel 'how much of the video to keep' (float32 H x W x 1; 0 = black) for the netting cover. Fully black inside the
+    clicked polygon, then fading smoothly back to the video over feather_frac of the video height below its edge (the fade goes
+    downwards only, so the line itself does not move). None = no feathering needed. Cached per frame size and polygon."""
+    feather_frac = TOP_MASK_FEATHER_FRAC if feather_frac is None else feather_frac
+    h, w = frame.shape[:2]
+    feather = int(h * feather_frac)
+    key = (h, w, polygon.tobytes(), feather)
+    if key not in _mask_cache:
+        if feather < 2:
+            _mask_cache[key] = None
+        else:
+            masked = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(masked, [polygon], 255)
+            dist = cv2.distanceTransform(255 - masked, cv2.DIST_L2, 5)      # pixels from the nearest covered pixel (0 inside)
+            t = np.clip(dist / float(feather), 0.0, 1.0)
+            keep = (t * t * (3.0 - 2.0 * t)).astype(np.float32)            # smoothstep: 0 at the edge, 1 at feather px away
+            rows = np.where(keep.min(axis=1) < 1.0)[0]
+            bottom = int(rows.max()) + 1 if len(rows) else 0
+            _mask_cache[key] = (bottom, keep[:bottom, :, None].copy())
+        if len(_mask_cache) > 4:
+            _mask_cache.pop(next(iter(_mask_cache)))
+    return _mask_cache[key]
+
+
+def apply_top_strip(frame):
+    """Black strip across the top (behind the logo and header text) with a soft lower edge. Cached per frame height."""
+    h = frame.shape[0]
+    strip_h, feather = int(h * TOP_STRIP_FRAC), int(h * TOP_STRIP_FEATHER_FRAC)
+    if strip_h < 2:
+        return frame
+    key = ("strip", h, strip_h, feather)
+    if key not in _mask_cache:
+        rows = strip_h + feather
+        t = np.clip((np.arange(rows, dtype=np.float32) - strip_h) / max(1, feather), 0.0, 1.0)
+        _mask_cache[key] = (t * t * (3.0 - 2.0 * t))[:, None, None].copy()
+        if len(_mask_cache) > 6:
+            _mask_cache.pop(next(iter(_mask_cache)))
+    keep = _mask_cache[key]
+    frame[:keep.shape[0]] = (frame[:keep.shape[0]].astype(np.float32) * keep).astype(np.uint8)
+    return frame
+
+
+def apply_top_mask(frame, polygon):
+    """Black out the netting above the clicked line, with a soft fade along its lower edge."""
+    cached = top_mask_keep(frame, polygon)
+    if cached is None:                                   # feathering off: the old hard edge
+        cv2.fillPoly(frame, [polygon], (0, 0, 0))
+        return frame
+    bottom, keep = cached
+    frame[:bottom] = (frame[:bottom].astype(np.float32) * keep).astype(np.uint8)
+    return frame
+
+
 ############################################### DRAW ALL ANNOTATIONS: Draw all the annotations onto the video we want:
-def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None):
+def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None, DASHBOARD=None, HEADER=None):
     """Process multiple frames in a batch for better performance."""
     annotation_frames = []
 
@@ -142,19 +231,122 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
 
         # Black out the netting: everything above the line clicked along its lower edge (Pitch Calibrator).
         if top_mask_polygon is not None:
-            cv2.fillPoly(annotation_frame, [top_mask_polygon], (0, 0, 0))
+            annotation_frame = apply_top_mask(annotation_frame, top_mask_polygon)
+        annotation_frame = apply_top_strip(annotation_frame)
         
         
         # Apply annotations (consider vectorizing these operations)
         annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
         annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
         annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY, layout)
-        annotation_frame = draw_stats(annotation_frame, data, layout=layout)
-        annotation_frame = draw_video_details(annotation_frame, frame_id, data, DETECTION_FPS,ORIGINAL_VIDEO_FPS, layout)
+        # live panel (clock/video time, team table, timeline) - or, if it cannot be drawn, the plain team boxes + the frame details on the right
+        d = DASHBOARD.at(frame_id) if (DASHBOARD is not None and layout) else None
+        if not (d is not None and draw_dashboard(annotation_frame, frame_id, data, DASHBOARD, layout, ORIGINAL_VIDEO_FPS, DETECTION_FPS, d)):
+            annotation_frame = draw_stats(annotation_frame, data, layout=layout)
+            annotation_frame = draw_video_details(annotation_frame, frame_id, data, DETECTION_FPS, ORIGINAL_VIDEO_FPS, layout)
+        # top: black strip, then the logo and the header text on it (teams with the live score as the game name)
+        annotation_frame = draw_logo(annotation_frame)
+        live_title = None
+        if d is not None and HEADER:
+            a_name, b_name = DASHBOARD.teams
+            live_title = f"{a_name}  {d['score'][0]} - {d['score'][1]}  {b_name}" if d.get("score") is not None else f"{a_name} vs {b_name}"
+        annotation_frame = draw_header(annotation_frame, HEADER, live_title)
         
         annotation_frames.append(annotation_frame)
     
     return annotation_frames
+
+def draw_logo(frame):
+    """Club logo in the top-left corner (images/polis_logo.png, transparent background). Silently skipped if missing."""
+    if not LOGO_FILE:
+        return frame
+    h, w = frame.shape[:2]
+    logo_h = max(8, int(h * LOGO_HEIGHT_FRAC))
+    if logo_h not in _logo_cache:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images", LOGO_FILE)
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None or img.ndim < 3 or img.shape[2] != 4:
+            _logo_cache[logo_h] = None
+        else:
+            logo_w = max(1, int(img.shape[1] * logo_h / img.shape[0]))
+            small = cv2.resize(img, (logo_w, logo_h), interpolation=cv2.INTER_AREA)
+            _logo_cache[logo_h] = (small[..., :3].astype(np.float32), small[..., 3:4].astype(np.float32) / 255.0)
+    cached = _logo_cache[logo_h]
+    if cached is None:
+        return frame
+    rgb, alpha = cached
+    m = int(h * LOGO_MARGIN_FRAC)
+    lx = int(h * LOGO_LEFT_FRAC)
+    strip_h = int(h * TOP_STRIP_FRAC)
+    ty = (strip_h - rgb.shape[0]) // 2 if strip_h >= rgb.shape[0] else m      # centred vertically in the black strip
+    y1, x1 = min(ty + rgb.shape[0], h), min(lx + rgb.shape[1], w)
+    rgb, alpha = rgb[:y1 - ty, :x1 - lx], alpha[:y1 - ty, :x1 - lx]
+    roi = frame[ty:y1, lx:x1].astype(np.float32)
+    frame[ty:y1, lx:x1] = (rgb * alpha + roi * (1.0 - alpha)).astype(np.uint8)
+    return frame
+
+
+def _wrap_text(text, fs, th, max_w, max_lines):
+    """word-wrap to max_w pixels, at most max_lines lines (the last one ends with '...' when the text is cut)"""
+    words, lines, cur = text.split(), [], ""
+    for i, w in enumerate(words):
+        trial = (cur + " " + w).strip()
+        if _text_w(trial, fs, th) <= max_w or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+        if len(lines) == max_lines:
+            break
+    else:
+        lines.append(cur)
+        return lines
+    lines = lines[:max_lines]
+    last = lines[-1]
+    while last and _text_w(last + "...", fs, th) > max_w:
+        last = last[:-1].rstrip()
+    lines[-1] = last + "..."
+    return lines
+
+
+def draw_header(frame, header, live_title=None):
+    """'Video Analysis', the teams with the live score, and the date + description, to the right of the logo (top-left).
+    The lines are equally spaced and the block is centred vertically in the black strip (like the logo). White text with a
+    dark outline so it reads over black and over the video alike. live_title replaces the game name."""
+    if not header:
+        return frame
+    h, w = frame.shape[:2]
+    m = int(h * LOGO_MARGIN_FRAC)
+    logo = _logo_cache.get(max(8, int(h * LOGO_HEIGHT_FRAC)))
+    x0 = int(h * LOGO_LEFT_FRAC) + (logo[0].shape[1] + int(h * LOGO_TEXT_GAP_FRAC) if logo else 0)
+    max_w = int(w * HEADER_MAX_WIDTH_FRAC) - x0
+    if max_w < 100:
+        return frame
+    caps = [max(6, int(h * f)) for f in HEADER_TEXT_HEIGHT_FRAC]
+    detail = "  |  ".join(x for x in (header.get("date"), header.get("description")) if x)
+    gap = max(2, int(caps[0] * HEADER_HEADING_GAP))   # the same space between every line: from the line above's baseline to the top of the next
+    lines = []                                         # (text, colour, level, font scale, thickness)
+    for text, colour, k, max_lines in ((header.get("heading"), (2, 202, 254), 0, 1),
+                                       (live_title or header.get("title"), (255, 255, 255), 1, 1),
+                                       (detail, (200, 200, 200), 2, HEADER_DESCRIPTION_LINES)):
+        if not text:
+            continue
+        fs = _fit(caps[k])
+        th = max(1, int(round(caps[k] / 14.0)))
+        for line in _wrap_text(text, fs, th, max_w, max_lines):
+            lines.append((line, colour, k, fs, th))
+    if not lines:
+        return frame
+    block_h = caps[lines[0][2]] + sum(gap + caps[k] for _, _, k, _, _ in lines[1:])
+    strip_h = int(h * TOP_STRIP_FRAC)
+    top = (strip_h - block_h) // 2 if strip_h >= block_h else m     # centred in the strip (else the old top margin)
+    y = top + caps[lines[0][2]]
+    for i, (line, colour, k, fs, th) in enumerate(lines):
+        if i:
+            y += gap + caps[k]
+        cv2.putText(frame, line, (x0, y), _FONT, fs, (0, 0, 0), th + 3, cv2.LINE_AA)
+        cv2.putText(frame, line, (x0, y), _FONT, fs, colour, th + (1 if k == 0 else 0), cv2.LINE_AA)
+    return frame
 
 # Original function maintained for backward compatibility
 def draw_annotations(frame_id, frame, data, pitch_points, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS):
@@ -227,6 +419,17 @@ def draw_pitch_detection_on_field(frame,frame_id,pitch_points,outline_px=None):
     cv2.addWeighted(dots, PITCH_DOT_ALPHA, frame, 1 - PITCH_DOT_ALPHA, 0, frame)
     return frame
 
+
+
+def draw_pointer(frame, x, y, color, half_w, height):
+    """Down-pointing triangle with its tip at (x, y): smooth edges and an outline that contrasts with
+    the fill (dark outline normally, white when the fill itself is dark, e.g. a black kit)."""
+    pts = np.array([(x, y), (x - half_w, y - height), (x + half_w, y - height)], np.float32)
+    lum = 0.114 * color[0] + 0.587 * color[1] + 0.299 * color[2]
+    outline = (255, 255, 255) if lum < 70 else (0, 0, 0)
+    fixed = np.round(pts * 16).astype(np.int32)                      # sub-pixel (shift=4) so the edges are smooth
+    cv2.fillConvexPoly(frame, fixed, tuple(int(c) for c in color), cv2.LINE_AA, 4)
+    cv2.polylines(frame, [fixed], True, outline, max(1, int(round(half_w / 9))), cv2.LINE_AA, 4)
 
 
 ############################################### DRAW PLAYER ANNOTATION ON FRAME VIDEO
@@ -427,44 +630,69 @@ def draw_object_detections_on_field(frame,frame_id,data,pitch_points,GAME_RUNNIN
 
 
     ######################### 2: Draw fully opaque elements directly on the frame: BALL AND POSESSION
+    # small down-pointing triangles with a dark outline and smooth edges, sized for the frame:
+    # white = the ball, team colour = the player in possession of it
+    ui = frame_layout_scale(frame)[0] * 2.0       # 1.0 on a 1920 px wide frame
     for object in data:
 
-        # Example of drawing a fully opaque bounding box
         x_min = int(object['xmin'])
         y_min = int(object['ymin'])
         x_max = int(object['xmax'])
         y_max = int(object['ymax'])
+        x, _ = get_center_of_bbox(x_min, y_min, x_max, y_max)
 
-        # only draw if it is a ball
         if object['class_name'] == "ball":
+            draw_pointer(frame, x, y_min - int(5 * ui), BALL_COLOR, 6 * ui, 11 * ui)
 
-            y= int(y_min)
-            x,_ = get_center_of_bbox(x_min,y_min,x_max,y_max)
-            triangle_points = np.array([
-                [x,y],
-                [x-10,y-20],
-                [x+10,y-20],
-            ])
-            cv2.drawContours(frame, [triangle_points],0,BALL_COLOR, cv2.FILLED)
-
-        # draw an ellipse if they are in posession of the ball:
         if object['ball_posession'] == True:
-
-            posession_color = (0, 0, 255)  # Red color in BGR format
-            y= int(y_min)
-            x,_ = get_center_of_bbox(x_min,y_min,x_max,y_max)
-            triangle_points = np.array([
-                [x,y],
-                [x-10,y-20],
-                [x+10,y-20],
-                ])
-            cv2.drawContours(frame, [triangle_points],0,posession_color, cv2.FILLED)    
+            color = PLAYER_COLOR
+            if object.get('team_color'):
+                try:
+                    color = tuple(int(c) for c in ast.literal_eval(object['team_color']))
+                except Exception:
+                    pass
+            draw_pointer(frame, x, y_min - int(8 * ui), color, 9 * ui, 15 * ui)
 
     return frame
 
 
 
 ##################################### -- draws the predictedtop view pitch with players/ball position
+_GRASS_TILE = None
+GRASS_STRIPE_PAIR_M = 7.0   # one light+dark mowing-stripe pair is about this wide on the real pitch
+GRASS_BRIGHTNESS = 0.80     # dim the texture a little so the dots and dotted circles stand out
+_grass_cache = {}
+
+
+def grass_texture(w, h, pitch_length_m):
+    """Mown-grass texture of size w x h (BGR), or None if images/pitch_grass.jpg is missing.
+    The source tile (two stripes) is tiled along the goal-to-goal axis so the stripes run
+    across the pitch, with one stripe pair ~GRASS_STRIPE_PAIR_M metres wide."""
+    global _GRASS_TILE
+    key = (int(w), int(h), round(float(pitch_length_m), 1))
+    if key in _grass_cache:
+        return _grass_cache[key]
+    if _GRASS_TILE is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images", "pitch_grass.jpg")
+        _GRASS_TILE = cv2.imread(path)
+        if _GRASS_TILE is None:
+            _GRASS_TILE = False
+    if _GRASS_TILE is False:
+        return None
+    period = max(8, int(round(w * GRASS_STRIPE_PAIR_M / max(1.0, pitch_length_m))))
+    tile = cv2.resize(_GRASS_TILE, (period, int(h)), interpolation=cv2.INTER_AREA)
+    reps = int(np.ceil(w / period)) + 1
+    wide = np.tile(tile, (1, reps, 1))
+    # centre the tiling so the halfway line falls on a stripe edge (mirror-symmetric look)
+    start = (wide.shape[1] - w) // 2
+    out = wide[:, start:start + int(w)]
+    out = np.clip(out.astype(np.float32) * GRASS_BRIGHTNESS, 0, 255).astype(np.uint8)
+    if len(_grass_cache) > 8:
+        _grass_cache.clear()
+    _grass_cache[key] = out
+    return out
+
+
 def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_width_m=21.0, overlay=None, layout=None):
 
     # Real-world rectangle dimensions for THIS game (legacy default 46x21 kept only for
@@ -524,7 +752,11 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
     if overlay:
         # plain grass colour: pitch_map.jpg has its own pre-drawn 46x21 markings which would
         # confuse an accuracy test (our own ideal markings are drawn below instead)
-        frame[y_offset:y_offset + scaled_height, x_offset:x_offset + scaled_width] = (46, 96, 46)
+        grass = grass_texture(scaled_width, scaled_height, pitch_length_m)
+        if grass is not None:
+            frame[y_offset:y_offset + scaled_height, x_offset:x_offset + scaled_width] = grass
+        else:
+            frame[y_offset:y_offset + scaled_height, x_offset:x_offset + scaled_width] = (46, 96, 46)
     else:
         background_img = cv2.imread("images/pitch_map.jpg")  # Replace with your background image
         if background_img is None:
@@ -546,9 +778,9 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
     )
 
     
-    ## ACCURACY TEST OVERLAY (optional): ideal centre circle / goal-end arcs (magenta) and where the
+    ## ACCURACY TEST OVERLAY (optional): ideal centre circle / goal-end arcs (dotted white) and where the
     ## clicked calibration circle points actually land after the fitted transform (yellow dots).
-    ## If the fit were perfect every yellow dot would sit exactly on a magenta line.
+    ## If the fit were perfect every yellow dot would sit exactly on a dotted white line.
     def world_to_inset(wx, wy):
         px, py = transform_point_to_new_rectangle(wx, wy, pitch_width, pitch_height, scaled_width, scaled_height, x_offset, y_offset)
         return px, (y_offset + scaled_height) - (py - y_offset)
@@ -557,9 +789,17 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
         line_w = max(1, int(3 * scale * ui))
         # halfway line
         cv2.line(frame, world_to_inset(0, -pitch_height / 2), world_to_inset(0, pitch_height / 2), (255, 255, 255), max(1, int(2 * scale * ui)), cv2.LINE_AA)
+        # centre circle and goal-end arcs: a dotted, semi-transparent white line (blended over the pitch inset only)
+        roi = frame[y_offset:y_offset + scaled_height, x_offset:x_offset + scaled_width]
+        dots = roi.copy()
+        dot_r = max(2, int(3.0 * scale * ui))
+        dot_gap = max(7.0, 16.0 * scale * ui)
         for shape in overlay.get('shapes', []):
-            shape_pts = np.array([world_to_inset(wx, wy) for wx, wy in shape['pts']], dtype=np.int32)
-            cv2.polylines(frame, [shape_pts.reshape(-1, 1, 2)], False, (255, 0, 255), line_w, cv2.LINE_AA)
+            shape_pts = np.array([world_to_inset(wx, wy) for wx, wy in shape['pts']], dtype=np.float64)
+            shape_pts -= (x_offset, y_offset)
+            for cx, cy in dotted_points(shape_pts, dot_gap):
+                cv2.circle(dots, (int(round(cx)), int(round(cy))), dot_r, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.addWeighted(dots, SHAPE_DOT_ALPHA, roi, 1.0 - SHAPE_DOT_ALPHA, 0, roi)
         for pt in overlay.get('points', []):
             c = world_to_inset(pt['x'], pt['y'])
             cv2.circle(frame, c, max(3, int(11 * scale * ui)), (0, 0, 0), -1)
@@ -627,10 +867,10 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
                 
                 # draw a slightly bigger red circle if they are in posession of the ball:
                 if object['ball_posession'] == True:
-                    cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius + max(1, int(5 * scale * ui)), (0,0,255), -1)
+                    cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius + max(1, int(5 * scale * ui)), (0,0,255), -1, cv2.LINE_AA)
 
                 # draw the player circle + tracker_id text
-                cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius, circle_color, -1)
+                cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius, circle_color, -1, cv2.LINE_AA)
                 #text_position = (map_position[0]-7,final_position_y+4)  # Slightly below the circle
                 #cv2.putText(
                 #    frame,
@@ -657,7 +897,11 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
 
 
 ############################################### DRAW STATS NEXT TO THE PTICH TOP VIEW: TEAM/NR OF PLAYERS
-def draw_stats(frame, data, padding_top=20, padding_bottom=20, font_scale=1.5, layout=None):
+def draw_stats(frame, data, padding_top=20, padding_bottom=20, font_scale=1.5, layout=None, dashboard=None, frame_id=None):
+
+    # the live dashboard (score, possession, distance, running, top speed, timeline) replaces the plain team boxes when it is available
+    if dashboard is not None and layout and frame_id is not None and draw_dashboard(frame, frame_id, data, dashboard, layout):
+        return frame
     
     # Dictionary to count occurrences of teams and their colors
     team_data = defaultdict(lambda: {'team_color': None, 'nr_of_players': 0})
@@ -715,6 +959,181 @@ def draw_stats(frame, data, padding_top=20, padding_bottom=20, font_scale=1.5, l
 
     return frame
 
+
+
+############################################### LIVE DASHBOARD: right of the overhead map (numbers come from dashboard.LiveDashboard)
+DASH_COLUMNS = ("Possession", "Last 2 min", "Distance", "Running", "Top speed (1 s)")
+DASH_MIN_W, DASH_MIN_H = 520, 110          # (at 3840 wide) smaller than this and the plain team boxes are used instead
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+_TEXT_H1 = cv2.getTextSize("Hg", _FONT, 1.0, 1)[0][1]
+
+
+def _fit(h):
+    """font scale whose capital height is about h pixels"""
+    return max(0.2, h / _TEXT_H1)
+
+
+def _text_w(text, fs, th):
+    return cv2.getTextSize(text, _FONT, fs, th)[0][0]
+
+
+def _timeline_image(dash, w, h):
+    """the possession-over-the-game strip, drawn once per video size"""
+    cache = getattr(dash, "_tl_cache", None)
+    if cache is not None and cache[0] == (w, h):
+        return cache[1]
+    img = np.full((h, w, 3), (38, 38, 38), dtype=np.uint8)
+    nb = len(dash.bins)
+    if nb:
+        for k, (a, b, n) in enumerate(dash.bins):
+            x_a, x_b = int(k * w / nb), max(int((k + 1) * w / nb), int(k * w / nb) + 1)
+            if n <= 0 or a + b == 0:
+                continue
+            fa, fb = a / (a + b), b / (a + b)
+            ha = int(round(fa * (h - 2)))
+            img[1:1 + ha, x_a:x_b] = dash.colour_light[dash.teams[0]]
+            img[1 + ha:h - 1, x_a:x_b] = dash.colour_light[dash.teams[1]]
+            known = (a + b) / n                      # bars fade towards grey when the ball was seen only part of the time
+            if known < 0.9:
+                shade = np.full_like(img[1:h - 1, x_a:x_b], (38, 38, 38))
+                img[1:h - 1, x_a:x_b] = cv2.addWeighted(img[1:h - 1, x_a:x_b], 0.35 + 0.65 * known, shade, 0.65 * (1 - known), 0)
+    cv2.rectangle(img, (0, 0), (w - 1, h - 1), (90, 90, 90), 1)
+    dash._tl_cache = ((w, h), img)
+    return img
+
+
+_ball_icon_cache = {}
+
+
+def _ball_icon(diameter):
+    """Small football icon (white ball, black patches, dark rim) as (BGR float32 image, alpha float32 image), drawn big and
+    shrunk so the edges are smooth. Cached per size."""
+    d = max(7, int(diameter))
+    if d in _ball_icon_cache:
+        return _ball_icon_cache[d]
+    S = 8                                                    # supersampling
+    N = d * S
+    img = np.zeros((N, N, 3), np.uint8)
+    alpha = np.zeros((N, N), np.uint8)
+    c = (N // 2, N // 2)
+    R = N // 2 - S                                           # leave room for the rim
+    cv2.circle(alpha, c, N // 2 - 1, 255, -1, cv2.LINE_AA)
+    cv2.circle(img, c, N // 2 - 1, (30, 30, 30), -1, cv2.LINE_AA)       # dark rim
+    cv2.circle(img, c, R, (250, 250, 250), -1, cv2.LINE_AA)             # white ball
+    import math
+
+    def pentagon(cx, cy, r, rot):
+        return np.array([(cx + r * math.cos(rot + k * 2 * math.pi / 5), cy + r * math.sin(rot + k * 2 * math.pi / 5)) for k in range(5)], np.int32)
+
+    cv2.fillConvexPoly(img, pentagon(c[0], c[1], R * 0.36, -math.pi / 2), (30, 30, 30), cv2.LINE_AA)
+    for k in range(5):                                       # the five patches round the edge, clipped by the ball
+        a = -math.pi / 2 + k * 2 * math.pi / 5 + math.pi / 5
+        px, py = c[0] + R * 0.92 * math.cos(a), c[1] + R * 0.92 * math.sin(a)
+        patch = np.zeros((N, N), np.uint8)
+        cv2.fillConvexPoly(patch, pentagon(px, py, R * 0.30, a + math.pi), 255, cv2.LINE_AA)
+        inside = np.zeros((N, N), np.uint8)
+        cv2.circle(inside, c, R, 255, -1)
+        img[(patch > 0) & (inside > 0)] = (30, 30, 30)
+    small = cv2.resize(img, (d, d), interpolation=cv2.INTER_AREA).astype(np.float32)
+    a_small = cv2.resize(alpha, (d, d), interpolation=cv2.INTER_AREA).astype(np.float32)[..., None] / 255.0
+    _ball_icon_cache[d] = (small, a_small)
+    return _ball_icon_cache[d]
+
+
+def draw_ball_icon(frame, cx, cy, diameter):
+    rgb, a = _ball_icon(diameter)
+    d = rgb.shape[0]
+    x1, y1 = cx - d // 2, cy - d // 2
+    x2, y2 = x1 + d, y1 + d
+    if x1 < 0 or y1 < 0 or x2 > frame.shape[1] or y2 > frame.shape[0]:
+        return
+    roi = frame[y1:y2, x1:x2].astype(np.float32)
+    frame[y1:y2, x1:x2] = (rgb * a + roi * (1.0 - a)).astype(np.uint8)
+
+
+def draw_goal_flag(frame, x, y_top, y_bottom, colour):
+    """Goal marker on the possession timeline: a thin dotted vertical line the height of the strip with a small flag in the
+    scoring team's colour at its top."""
+    h = y_bottom - y_top
+    step = max(4, int(h * 0.11))
+    r = max(1, int(h * 0.03))
+    for yy in range(y_top + 1, y_bottom, step):
+        cv2.circle(frame, (x, yy), r + 1, (0, 0, 0), -1, cv2.LINE_AA)          # dark halo so the dots show on yellow and green bars alike
+        cv2.circle(frame, (x, yy), r, (255, 255, 255), -1, cv2.LINE_AA)
+    fw, fh = max(6, int(h * GOAL_FLAG_W)), max(5, int(h * GOAL_FLAG_H))
+    flag = np.array([(x, y_top + 1), (x + fw, y_top + 1 + fh // 2), (x, y_top + 1 + fh)], np.int32)
+    cv2.fillConvexPoly(frame, flag, tuple(int(c) for c in colour), cv2.LINE_AA)
+    cv2.polylines(frame, [flag], True, (255, 255, 255), 1, cv2.LINE_AA)
+    draw_ball_icon(frame, x, (y_top + y_bottom) // 2, int(h * GOAL_BALL_D))      # a little football in the middle of the line
+
+
+def draw_dashboard(frame, frame_id, data, dash, layout, video_fps=None, detection_fps=None, d=None):
+    """Score / clock line, a small table (one row per team: possession, last 2 minutes, distance, running spells, top speed)
+    and the possession timeline. Returns False (nothing drawn) when the panel is too small, so the caller can fall back."""
+    scale, W, H = frame_layout_scale(frame)
+    x0, x1 = layout['stats_x'], W - layout['margin']          # the panel runs to the right edge: the frame details now sit in its headline row
+    y0, y1 = layout['panel_top'] + layout['margin'], H - layout['margin']
+    if (x1 - x0) < DASH_MIN_W * scale or (y1 - y0) < DASH_MIN_H * scale:
+        return False
+    d = d if d is not None else dash.at(frame_id)
+    total = y1 - y0
+    gap = max(3, int(total * 0.03))
+    hl_h, hdr_h, row_h = int(total * 0.17), int(total * 0.10), int(total * 0.21)
+    tl_h = max(8, total - hl_h - hdr_h - 2 * row_h - 4 * gap)
+    th = max(1, int(round(total / 90)))
+
+    # ---- headline: game clock, then the video time / frame id / detection fps (the teams and score are in the header at the top)
+    fs = _fit(hl_h * 0.62)
+    base = y0 + int(hl_h * 0.80)
+    cv2.putText(frame, d["phase"], (x0, base), _FONT, fs, (255, 255, 255), th + 1, cv2.LINE_AA)
+    if video_fps:
+        info = f"Video {TimeUtils.frame_to_timestamp(frame_id, video_fps)}   |   Frame id: {frame_id}"
+        if detection_fps:
+            info += f"   |   Detection fps: {detection_fps}"
+        fs_info = _fit(hl_h * 0.40)
+        cv2.putText(frame, info, (x0 + _text_w(d["phase"], fs, th + 1) + int(60 * scale), base), _FONT, fs_info, (190, 190, 190), max(1, th), cv2.LINE_AA)
+
+    # ---- rows: team box (as before) + the numbers
+    counts = {}
+    for e in data:
+        if e.get('class_name') == 'player' and e.get('team') not in ('Goalkeeper', 'Referee'):
+            counts[e['team']] = counts.get(e['team'], 0) + 1
+    fs_chip = _fit(row_h * 0.46)
+    chip_texts = [f"{t['name']}: {counts.get(t['label'], 0)} players" for t in d["teams"]]
+    chip_w = max(_text_w(c, fs_chip, th + 1) for c in chip_texts) + int(row_h * 0.5)
+    cx0 = x0 + chip_w + int(40 * scale)
+    col_w = max(1.0, (x1 - cx0) / len(DASH_COLUMNS))
+    fs_h = _fit(hdr_h * 0.55)
+    hdr_y = y0 + hl_h + gap + int(hdr_h * 0.85)
+    for c, name in enumerate(DASH_COLUMNS):
+        cv2.putText(frame, name, (int(cx0 + c * col_w), hdr_y), _FONT, fs_h, (165, 165, 165), max(1, th - 1), cv2.LINE_AA)
+    fs_v = _fit(row_h * 0.46)
+    for k, t in enumerate(d["teams"]):
+        ry = y0 + hl_h + gap + hdr_h + gap + k * (row_h + gap)
+        colour = t["colour"]
+        cv2.rectangle(frame, (x0, ry), (x0 + chip_w, ry + row_h), colour, -1)
+        if sum(colour) < 200:       # a black kit: a light edge so the box still shows on the black panel
+            cv2.rectangle(frame, (x0, ry), (x0 + chip_w, ry + row_h), (150, 150, 150), 1)
+        cv2.putText(frame, chip_texts[k], (x0 + int(row_h * 0.25), ry + int(row_h * 0.68)), _FONT, fs_chip, get_contrasting_color(colour), th + 1, cv2.LINE_AA)
+        vals = [f"{t['poss']:.0f}%" if t["poss"] is not None else "-",
+                f"{t['poss_recent']:.0f}%" if t["poss_recent"] is not None else "-",
+                f"{t['dist_km']:.2f} km" if t["dist_km"] > 0.005 else "-",
+                str(t["runs"]),
+                f"{t['top']:.1f} km/h" if t["top"] > 0 else "-"]
+        for c, v in enumerate(vals):
+            cv2.putText(frame, v, (int(cx0 + c * col_w), ry + int(row_h * 0.68)), _FONT, fs_v, (255, 255, 255), th + 1, cv2.LINE_AA)
+
+    # ---- timeline: possession over the game, now, and the goals
+    ty = y1 - tl_h
+    tw = max(2, x1 - x0)
+    frame[ty:ty + tl_h, x0:x0 + tw] = _timeline_image(dash, tw, tl_h)
+    span = max(dash.end - dash.start, 1.0)
+    for g in dash.goals if d["score"] is not None else []:
+        gx = x0 + int(min(max((g["t"] - dash.start) / span, 0), 1) * (tw - 1))
+        draw_goal_flag(frame, gx, ty, ty + tl_h, dash.colour_light[g["team"]])
+    nx = x0 + int(min(max((d["t"] - dash.start) / span, 0), 1) * (tw - 1))
+    cv2.line(frame, (nx, ty - 3), (nx, ty + tl_h + 3), (255, 255, 255), max(2, th), cv2.LINE_AA)
+    return True
 
 
 ############################################### DRAW VIDEO STATS ON THE RIGHT SIDE:

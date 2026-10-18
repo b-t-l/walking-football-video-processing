@@ -88,6 +88,7 @@ def clean_name(fname):
     base = os.path.splitext(fname)[0]
     base = re.sub(r"\.rf\.[0-9a-fA-F]+$", "", base)
     base = re.sub(r"_(jpg|jpeg|png)$", "", base)
+    base = re.sub(r"^\d{1,3}pc_.*?_(?=\d{4}_f\d+_)", "", base)      # _unsure pictures: 41pc_Polis-Lions_0022_f000123_... -> 0022_f000123_...
     return base
 
 

@@ -6,6 +6,7 @@ from ball_images import ExtractBallImages
 from goal_detection import GoalDetection
 from youtube_description import YoutubeDescription
 from data import GetGameData
+from data.create_database import TEAM_MODEL_FILE
 from view_transformer import CreateViewTransformations
 from track_stitcher import TrackStitcher
 from keeper_zone import KeeperZone
@@ -222,7 +223,8 @@ def main():
                           GAME_RECORD['statistics_source_video'],
                           TEAM_IMAGES_FOLDER,
                           GAME_RECORD,
-                          n_frames=10).run()
+                          n_frames=10,
+                          team_model_path=os.path.join('models', 'teams', TEAM_MODEL_FILE)).run()
 
     # - BALL TRAINING IMAGES: 40 full frames picked where the ball detector is weak (ball lost, false balls, tiny, fast ...)
     if RUN_BALL_IMAGES == True:

@@ -36,6 +36,17 @@ for handler in moviepy_logger.handlers:
 # either side (picture only - the database and statistics are untouched). False = output at the detection fps instead.
 INTERPOLATE_TO_VIDEO_FPS = True
 
+# Quality of the annotated video. It used to be capped at 3000k (3 Mbit/s) - the source video is about 25 Mbit/s - which smeared
+# the thin lines, small text and the dashboard. On the Mac (hardware encoder) the average bitrate below is what counts; elsewhere
+# the software encoder uses the constant-quality value instead (lower number = better, 16-18 is visually clean).
+# Rough file size per hour of video at 1080p: 10000k = 4.5 GB, 12000k = 5.4 GB, 16000k = 7.2 GB.
+ANNOTATED_VIDEO_BITRATE_K = 12000
+ANNOTATED_VIDEO_CRF = 17
+
+# Overhead map: player dots are drawn from a lightly smoothed copy of their positions (seconds either side of the moment that
+# are averaged; the raw positions jitter by more than the players move). 0 = off. Picture only, the database is untouched.
+POSITION_SMOOTHING_S = 0.2
+
 
 class CreateVideoAnnotated:
 
@@ -131,6 +142,13 @@ class CreateVideoAnnotated:
             self.FOOT_PIXEL_FN = None
 
         self.PITCH_DETECTION_OVERRIDE = PITCH_DETECTION_OVERRIDE
+        self.DASHBOARD = None            # built after the database is open (see below)
+        try:
+            from .header import build_header
+            self.HEADER = build_header(GAME_RECORD)
+        except Exception as e:
+            print(f"   video header text not used ({type(e).__name__}: {e})")
+            self.HEADER = None
         self.PITCH_OVERRIDE_KEYPOINTS = GAME_PITCH_KEYPOINTS_WITH_NAMES
         self.PITCH_OVERRIDE_BOUNDARIES = GAME_PITCH_BOUNDARIES
 
@@ -144,7 +162,28 @@ class CreateVideoAnnotated:
                 ''', (self.GAME_RECORD['game_id'],))
         self.DB_GAME_DETAILS = self.cursor.fetchone()
         self.DETECTION_FPS = self.DB_GAME_DETAILS[4]
+        # live dashboard (score, possession, distance, running, top speed, timeline) - same numbers as the match report.
+        # If anything is missing (team names, detections) the video is made with the plain team boxes instead.
+        try:
+            from .dashboard import LiveDashboard
+            self.DASHBOARD = LiveDashboard(self.DATABASE_FILE, self.GAME_RECORD, self.CREATE_VIDEO_OUTPUT_PATH, self.GAME_RUNNING_SPEED)
+        except Exception as e:
+            print(f"   live dashboard not used ({type(e).__name__}: {e}); the plain team boxes are drawn instead")
+            self.DASHBOARD = None
         self.ORIGINAL_VIDEO_FPS = self.DB_GAME_DETAILS[3]
+        # smoothed overhead positions (see video_annotator/smoothing.py); any problem -> raw positions are used
+        self.SMOOTHED = {}
+        if POSITION_SMOOTHING_S and POSITION_SMOOTHING_S > 0:
+            try:
+                from .smoothing import smoothed_positions
+                self.cursor.execute("PRAGMA table_info(detected_objects)")
+                _has_pid = "player_id" in {row[1] for row in self.cursor.fetchall()}
+                self.SMOOTHED = smoothed_positions(self.cursor, POSITION_SMOOTHING_S, self.ORIGINAL_VIDEO_FPS,
+                                                   "COALESCE(player_id, tracker_id)" if _has_pid else "tracker_id")
+                print(f"   overhead positions smoothed over {POSITION_SMOOTHING_S} s ({len(self.SMOOTHED)} player positions)")
+            except Exception as e:
+                print(f"   position smoothing not used ({type(e).__name__}: {e}); raw positions are drawn")
+                self.SMOOTHED = {}
         self.CREATE_VIDEO_OUTPUT_FPS = self.DETECTION_FPS
 
         # frames in between the detection frames get interpolated detections, so the video is drawn at the video fps
@@ -247,6 +286,14 @@ class CreateVideoAnnotated:
                 'team_color': row[15]
             })
         
+        # overhead map: swap in the smoothed positions (players only; the ball keeps its detected position)
+        if getattr(self, "SMOOTHED", None):
+            for o in objects:
+                if o['class_name'] != 'ball' and o['tracker_id'] is not None:
+                    sm = self.SMOOTHED.get((frame_number, int(o['tracker_id'])))
+                    if sm is not None:
+                        o['x_transformed_metres'], o['y_transformed_metres'] = sm
+
         # Fetch PITCH KEYPOINTS for this frame:
         self.cursor.execute('''
             SELECT x, y, name, x_transformed_metres, y_transformed_metres
@@ -397,7 +444,9 @@ class CreateVideoAnnotated:
                                 self.FOOT_PIXEL_FN,
                                 self.PANEL_TOP_FRACTION,
                                 self.PITCH_OUTLINE_FRAC,
-                                self.TOP_MASK_FRAC
+                                self.TOP_MASK_FRAC,
+                                self.DASHBOARD,
+                                self.HEADER
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy
@@ -438,7 +487,7 @@ class CreateVideoAnnotated:
                         audio=False,
                         threads=4,
                         preset='fast',
-                        ffmpeg_params=['-crf', '18', '-b:v', '3000k']
+                        ffmpeg_params=['-b:v', f'{ANNOTATED_VIDEO_BITRATE_K}k']
                     )
                 else:
                     chunk_clip.write_videofile(
@@ -447,7 +496,7 @@ class CreateVideoAnnotated:
                         audio=False,
                         threads=4,
                         preset='fast',
-                        ffmpeg_params=['-crf', '18', '-b:v', '3000k']
+                        ffmpeg_params=['-crf', str(ANNOTATED_VIDEO_CRF)]
                     )
             
             # Clear clips to free memory

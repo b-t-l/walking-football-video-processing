@@ -45,6 +45,7 @@ def cleanup_gpu_memory():
 # v10 (69 vs 92 ms per frame on MPS FP16) with ~95% of v10's on-pitch players found again (game 22, 40 frames).
 # To go back: 'best-v10-1920x1920.pt'
 PLAYERS_MODEL_FILE = 'yolo26-no-augementation.pt'
+TEAM_MODEL_FILE = 'team-20261018-yolo26n-cls.pt'   # in models/teams/. Retrained with train_team_model.py (was best-v7-192x192.pt, yolov8n-cls). Also used by the team-images step
 # DETECTION CONFIDENCE for the player model: every class needs PLAYER_CONF, except 'goalkeeper' boxes, which are kept from
 # KEEPER_MIN_CONF up. The goalkeeper stands alone by the goal in a kit nobody else wears, and the model is often unsure of him
 # (confidence split between the player and goalkeeper classes), so the single 0.6 cut threw most of them away (game 22: found in
@@ -298,7 +299,7 @@ class CreateDatabase:
         # Initialize YOLO models
         self.PLAYERS_MODEL_PATH = os.path.join('models', 'objects', PLAYERS_MODEL_FILE)
         self.BALL_MODEL_PATH = os.path.join('models', 'ball', 'yolo26-2026-10-14.pt')
-        self.TEAM_MODEL_PATH = os.path.join('models', 'teams', 'team-20261015-yolo26n-cls.pt')   # was best-v7-192x192.pt (yolov8n-cls); retrained with train_team_model.py
+        self.TEAM_MODEL_PATH = os.path.join('models', 'teams', TEAM_MODEL_FILE)
         
         self.BALL_TRACKER = YOLO(self.BALL_MODEL_PATH)
         self.PLAYERS_TRACKER = YOLO(self.PLAYERS_MODEL_PATH)
