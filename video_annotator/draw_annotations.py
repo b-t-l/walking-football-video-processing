@@ -37,6 +37,7 @@ LOGO_LEFT_FRAC = 0.032            # gap from the left edge to the logo (the head
 _logo_cache = {}
 
 GOAL_BALL_D = 0.40                       # diameter of the football on the goal marker, as a share of the timeline strip's height
+RUN_LINE_COLOUR = (40, 40, 240)         # BGR red: dotted line on the timeline wherever a running spell started
 GOAL_FLAG_W, GOAL_FLAG_H = 0.34, 0.28   # goal flag on the timeline: width and height as a share of the timeline strip's height
 SHAPE_DOT_ALPHA = 0.50   # how solid the dotted white circles on the overhead map are (1 = fully solid)
 
@@ -209,16 +210,20 @@ def apply_top_mask(frame, polygon):
 
 
 ############################################### DRAW ALL ANNOTATIONS: Draw all the annotations onto the video we want:
-def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None, DASHBOARD=None, HEADER=None):
-    """Process multiple frames in a batch for better performance."""
+def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None, DASHBOARD=None, HEADER=None, field_overlays=True):
+    """Process multiple frames in a batch for better performance.
+
+    field_overlays=False (edited-video background): skip boxes, pitch outline and netting mask;
+    still draw the overhead map, dashboard/header and top strip.
+    """
     annotation_frames = []
 
     frame_height, frame_width = frames[0].shape[:2]
     scale, _, _ = frame_layout_scale(frames[0])
     layout = compute_bottom_layout(frames[0], PANEL_TOP_FRACTION, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OUTLINE_FRAC)
-    top_mask_polygon = compute_top_mask_polygon(frames[0], TOP_MASK_FRAC)
+    top_mask_polygon = compute_top_mask_polygon(frames[0], TOP_MASK_FRAC) if field_overlays else None
     outline_px = (np.asarray(PITCH_OUTLINE_FRAC, dtype=float) * np.array([frame_width, frame_height], dtype=float)
-                  if PITCH_OUTLINE_FRAC is not None and len(PITCH_OUTLINE_FRAC) else None)
+                  if field_overlays and PITCH_OUTLINE_FRAC is not None and len(PITCH_OUTLINE_FRAC) else None)
     panel_top = layout['panel_top'] if layout else min(int(REF_PANEL_TOP * scale), frame_height)
 
     # Process frames in batch
@@ -236,8 +241,9 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
         
         
         # Apply annotations (consider vectorizing these operations)
-        annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
-        annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
+        if field_overlays:
+            annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
+            annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
         annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY, layout)
         # live panel (clock/video time, team table, timeline) - or, if it cannot be drawn, the plain team boxes + the frame details on the right
         d = DASHBOARD.at(frame_id) if (DASHBOARD is not None and layout) else None
@@ -1067,6 +1073,16 @@ def draw_goal_flag(frame, x, y_top, y_bottom, colour):
     draw_ball_icon(frame, x, (y_top + y_bottom) // 2, int(h * GOAL_BALL_D))      # a little football in the middle of the line
 
 
+def draw_run_line(frame, x, y_top, y_bottom):
+    """Running marker on the possession timeline: a red dotted vertical line the height of the strip (no flag, so it
+    cannot be mistaken for a goal)."""
+    h = y_bottom - y_top
+    step = max(5, int(h * 0.15))
+    r = max(1.5, h * 0.03)               # dot radius in pixels (fractions allowed)
+    for yy in range(y_top + 1, y_bottom, step):
+        cv2.circle(frame, (int(x * 16), int(yy * 16)), int(r * 16), RUN_LINE_COLOUR, -1, cv2.LINE_AA, 4)    # plain red dots, no outline (sub-pixel radius)
+
+
 def draw_dashboard(frame, frame_id, data, dash, layout, video_fps=None, detection_fps=None, d=None):
     """Score / clock line, a small table (one row per team: possession, last 2 minutes, distance, running spells, top speed)
     and the possession timeline. Returns False (nothing drawn) when the panel is too small, so the caller can fall back."""
@@ -1128,6 +1144,8 @@ def draw_dashboard(frame, frame_id, data, dash, layout, video_fps=None, detectio
     tw = max(2, x1 - x0)
     frame[ty:ty + tl_h, x0:x0 + tw] = _timeline_image(dash, tw, tl_h)
     span = max(dash.end - dash.start, 1.0)
+    for t_run in getattr(dash, "run_marks", []):                    # running first, so a goal marker sits on top if they coincide
+        draw_run_line(frame, x0 + int(min(max((t_run - dash.start) / span, 0), 1) * (tw - 1)), ty, ty + tl_h)
     for g in dash.goals if d["score"] is not None else []:
         gx = x0 + int(min(max((g["t"] - dash.start) / span, 0), 1) * (tw - 1))
         draw_goal_flag(frame, gx, ty, ty + tl_h, dash.colour_light[g["team"]])

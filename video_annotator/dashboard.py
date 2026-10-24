@@ -10,7 +10,7 @@ Every number comes from the same code as the match report (reports/match_report/
   top speed       the highest speed any of the team's players has held for a whole second so far
   score / clock   the game clock ("1st half 04:12") and the score; the score is only shown when the goals found by Goal
                   detection agree with the score typed into the Game Logger (otherwise a wrong goal could be shown)
-  timeline        possession over the whole game in 15 s bars, a moving marker for now, and the goals
+  timeline        possession over the whole game in 15 s bars, a moving marker for now, the goals, and a red dotted line wherever running was detected
 
 Possession needs the ball to be seen, so it stays '-' until there is enough to go on (POSS_MIN_KNOWN_S).
 """
@@ -78,6 +78,7 @@ class LiveDashboard:
         # running spells so far
         ev = M["running"]["events"]
         self.run_t = {tm: np.sort(np.array([e["t"] for e in ev if e["team"] == tm], dtype=float)) for tm in self.teams}
+        self.run_marks = sorted(float(e["t"]) for e in ev if e["team"] in self.teams)     # where each running spell starts, for the red lines on the timeline
 
         # team colours (BGR) from the database labels
         self.colour = {tm: self._db_colour(db_path, self.label[tm]) for tm in self.teams}

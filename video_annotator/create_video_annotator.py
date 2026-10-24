@@ -67,14 +67,18 @@ class CreateVideoAnnotated:
                  GAME_PITCH_KEYPOINTS_WITH_NAMES,
                  GAME_PITCH_BOUNDARIES,
                  ANNOTATED_PATH=None,
-                 WORK_DIR=None):
+                 WORK_DIR=None,
+                 BACKGROUND_VIDEO=None,
+                 FIELD_OVERLAYS=True):
 
         print("-------------------------------------------------")
         print("CREATE VIDEO ANNOTATED: Creating video from database records")
 
         
 
-        self.INPUT_VIDEO_TITLE = GAME_RECORD['statistics_source_video']
+        # BACKGROUND_VIDEO: analysis (default) or edited; FIELD_OVERLAYS False = header/dashboard/overhead only
+        self.INPUT_VIDEO_TITLE = BACKGROUND_VIDEO or GAME_RECORD['statistics_source_video']
+        self.FIELD_OVERLAYS = bool(FIELD_OVERLAYS)
         self.START_TIME = TimeUtils.time_to_seconds(GAME_RECORD['game_start_seconds'])
         self.END_TIME = TimeUtils.time_to_seconds(GAME_RECORD['game_end_seconds'])
         self.DURATION = DURATION
@@ -89,6 +93,8 @@ class CreateVideoAnnotated:
         self.TEAMS = TEAMS
         self.GAME_RECORD = GAME_RECORD
         self.GAME_RUNNING_SPEED = float(GAME_RECORD['running_speed_km_h'])
+        if not self.FIELD_OVERLAYS:
+            print("   background: edited-style overlays only (header, dashboard, overhead map; no boxes or pitch outline)")
 
         #- Per-game pitch size for the top-view inset (drives transform_point_to_new_rectangle).
         #  Preferred: from this game's Pitch Calibrator export (pitch_calibrator_json), which
@@ -239,11 +245,14 @@ class CreateVideoAnnotated:
         print(f"✅ Found {len(self.valid_frame_ids)} valid frames in the database within the specified duration.")
         #print("Frame IDs in database:", self.valid_frame_ids[:100], "...")  # Print first 10 frames
         
-        # Create the output video file name:
+        # Create the output video file name (annotated-edited when the edited video is the background)
         timestr = time.strftime("%Y%m%d-%H%M%S")
         #self.OUTPUT_VIDEO_TITLE = f"../output/game-id-{self.GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(self.GAME_RECORD['title'])}-{timestr}.mp4"
+        kind = "annotated-edited" if not self.FIELD_OVERLAYS else "annotated"
+        if self.DURATION:
+            kind = kind + "-test"
         self.OUTPUT_VIDEO_TITLE = GameFiles.report_file(self.WORK_DIR, self.GAME_RECORD, "annotated-no-sound", timestr, "mp4")
-        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = GameFiles.report_file(self.ANNOTATED_PATH, self.GAME_RECORD, "annotated-test" if self.DURATION else "annotated", timestr, "mp4")
+        self.OUTPUT_VIDEO_TITLE_WITH_AUDIO = GameFiles.report_file(self.ANNOTATED_PATH, self.GAME_RECORD, kind, timestr, "mp4")
 
     ##########################################################
     # Get frame details from database: objects and pitch keypoints
@@ -347,8 +356,10 @@ class CreateVideoAnnotated:
         print(f"✅ Total frames to process: {len(self.valid_frame_ids)}")
         
         video = VideoFileClip(self.INPUT_VIDEO_TITLE)
-        original_fps = video.fps
-        print(f"✅ Original video FPS: {original_fps}")
+        # Seek by the analysis video's FPS from the detections DB (frame_id clock), not the background file's fps
+        seek_fps = float(self.ORIGINAL_VIDEO_FPS)
+        print(f"✅ Background video FPS (file): {video.fps}")
+        print(f"✅ Seek / timeline FPS (detections DB): {seek_fps}")
         print(f"✅ Target output FPS: {self.OUTPUT_FPS}")
         print(f"✅ Device: {self.DEVICE} | Chunk size:{self.CHUNK_SIZE} | Annotation batch size: {self.ANNOTATIONS_BATCH_SIZE}")
 
@@ -403,7 +414,7 @@ class CreateVideoAnnotated:
             
             # Process frames within chunk
             for frame_id in current_chunk:
-                t = frame_id / original_fps
+                t = frame_id / seek_fps
                 frame = video.get_frame(t).copy()
                 
                 # Convert frame from RGB to BGR for OpenCV compatibility
@@ -446,7 +457,8 @@ class CreateVideoAnnotated:
                                 self.PITCH_OUTLINE_FRAC,
                                 self.TOP_MASK_FRAC,
                                 self.DASHBOARD,
-                                self.HEADER
+                                self.HEADER,
+                                field_overlays=self.FIELD_OVERLAYS,
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy

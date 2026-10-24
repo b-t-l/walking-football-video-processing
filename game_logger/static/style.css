@@ -124,6 +124,8 @@ details.sec[open] > summary::before { transform: rotate(90deg); }
 /* run panel + console */
 .run-steps { display: grid; gap: 6px; margin-top: 12px; }
 .run-step { display: flex; gap: 8px; align-items: baseline; margin: 0; color: var(--text); font-weight: 400; }
+.run-annotate-bg { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.run-annotate-bg label { display: inline-flex; gap: 8px; align-items: center; margin: 0; color: var(--text); font-weight: 400; }
 .run-test { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
 .run-test label { display: inline-flex; gap: 6px; align-items: center; margin: 0; color: var(--text); font-weight: 400; }
 .run-bar { height: 10px; background: var(--line); border-radius: 6px; margin-top: 12px; overflow: hidden; }

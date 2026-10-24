@@ -51,6 +51,8 @@ def main():
     _ap.add_argument('--game', type=int, help='game id to process')
     _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images, goal_detection, youtube_description')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
+    _ap.add_argument('--annotate-background', choices=['analysis', 'edited'], default='analysis',
+                     help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard and overhead map only)')
     _args, _unknown = _ap.parse_known_args()
     if _args.game is not None:
         GAME_ID = _args.game
@@ -69,6 +71,7 @@ def main():
         RUN_BALL_IMAGES = 'ball_images' in _steps
         RUN_GOAL_DETECTION = 'goal_detection' in _steps
         RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
+    ANNOTATE_BACKGROUND = _args.annotate_background or 'analysis'
     TEST_RUN = bool(_args.duration)
     if TEST_RUN:
         DURATION = _args.duration
@@ -142,10 +145,33 @@ def main():
     print(f"Detections database: {DATABASE_FILE}")
 
     # the analysis video must exist before we start (it is found in the game folder by name unless a path is set on the game)
-    if (RUN_DETECTIONS or RUN_ANNOTATION_VIDEO_CREATOR or RUN_TEAM_IMAGES or RUN_BALL_IMAGES) and not os.path.exists(str(GAME_RECORD['statistics_source_video'])):
+    if (RUN_DETECTIONS or RUN_TEAM_IMAGES or RUN_BALL_IMAGES or (RUN_ANNOTATION_VIDEO_CREATOR and ANNOTATE_BACKGROUND == 'analysis')) and not os.path.exists(str(GAME_RECORD['statistics_source_video'])):
         raise SystemExit(f"\nSTOPPED: the analysis video was not found: {GAME_RECORD['statistics_source_video']}\n"
                          "Put it in the game's videos folder as <game number>_analysis.mp4, or choose it on the game page in the game logger.\n")
 
+    # annotated video background: analysis (default, full overlays) or edited (header / dashboard / overhead only)
+    ANNOTATE_BACKGROUND_VIDEO = GAME_RECORD['statistics_source_video']
+    ANNOTATE_FIELD_OVERLAYS = True
+    if RUN_ANNOTATION_VIDEO_CREATOR and ANNOTATE_BACKGROUND == 'edited':
+        ANNOTATE_FIELD_OVERLAYS = False
+        edited_path = None
+        if GAME_SOURCE == 'database':
+            from game_logger import db as gl_db, repo as gl_repo
+            _conn = gl_db.connect()
+            try:
+                _g = gl_repo.get_game(_conn, GAME_ID)
+                edited_path = ((_g.get('videos') or {}).get('edited') or {}).get('path') if _g else None
+            finally:
+                _conn.close()
+        else:
+            from game_logger import paths as game_paths
+            edited_path = game_paths.conventional_video(GAME_ID, 'edited')
+        if not edited_path or not os.path.exists(str(edited_path)):
+            raise SystemExit(f"\nSTOPPED: the edited video was not found"
+                             + (f": {edited_path}" if edited_path else "")
+                             + "\nPut it in the game's videos folder as <game number>_edited.mp4, or choose it on the game page, or use --annotate-background analysis.\n")
+        ANNOTATE_BACKGROUND_VIDEO = edited_path
+        print(f"Annotated background: edited video (dashboard / header / overhead only): {ANNOTATE_BACKGROUND_VIDEO}")
 
     print('-------------------------- PROCESSING STARTED: ')
 
@@ -263,7 +289,9 @@ def main():
                                 GAME_PITCH_KEYPOINTS_WITH_NAMES,
                                 GAME_PITCH_BOUNDARIES,
                                 ANNOTATED_PATH=ANNOTATED_PATH,
-                                WORK_DIR=WORK_DIR)
+                                WORK_DIR=WORK_DIR,
+                                BACKGROUND_VIDEO=ANNOTATE_BACKGROUND_VIDEO,
+                                FIELD_OVERLAYS=ANNOTATE_FIELD_OVERLAYS)
         annotated_video.run()
 
 

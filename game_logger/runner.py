@@ -130,9 +130,8 @@ def status():
         return dict(meta) if meta else None
 
 
-def start(conn, game_id, steps, duration_s=None):
+def start(conn, game_id, steps, duration_s=None, annotate_background=None):
     steps = [s for s in STEP_IDS if s in set(steps or [])]       # keep the pipeline's own order
-    errors = []
     if not steps:
         raise repo.ValidationError("Tick at least one stage to run")
     g = repo.get_game(conn, game_id, with_detail=False)
@@ -144,6 +143,17 @@ def start(conn, game_id, steps, duration_s=None):
         raise repo.ValidationError("The test length must be a whole number of seconds")
     if duration_s < 0:
         raise repo.ValidationError("The test length cannot be negative")
+
+    bg = (annotate_background or "analysis").strip().lower() if annotate_background else "analysis"
+    if bg not in ("analysis", "edited"):
+        raise repo.ValidationError("Background video must be 'analysis' or 'edited'")
+    if "annotation" not in steps:
+        bg = "analysis"                                          # only used when annotation runs
+    elif bg == "edited":
+        g_full = repo.get_game(conn, game_id)                    # need videos.edited from effective_video
+        edited = (g_full.get("videos") or {}).get("edited") if g_full else None
+        if not edited or not edited.get("exists"):
+            raise repo.ValidationError("This game has no edited video, so Annotated video cannot use Edited as the background. Choose Analysis, or add the edited video on the game page.")
 
     with _lock:
         cur = _refresh(_load_current())
@@ -165,6 +175,8 @@ def start(conn, game_id, steps, duration_s=None):
                                        " yet, so tick Detections as well.")
         if "annotation" in steps and "detections" not in steps:
             notes.append("Annotated video without Detections in this run: it uses the player pictures saved by the last detections run.")
+        if "annotation" in steps and bg == "edited":
+            notes.append("Annotated video background: Edited (header, dashboard and overhead map only; no boxes or pitch outline).")
 
         folder = log_folder(game_id)
         os.makedirs(folder, exist_ok=True)
@@ -175,6 +187,8 @@ def start(conn, game_id, steps, duration_s=None):
         cmd = [sys.executable, "-u", "main.py", "--game", str(game_id), "--steps", ",".join(steps)]
         if duration_s:
             cmd += ["--duration", str(duration_s)]
+        if "annotation" in steps:
+            cmd += ["--annotate-background", bg]
         shown_cmd = " ".join(cmd)
         if sys.platform == "darwin" and shutil.which("caffeinate"):
             cmd = ["caffeinate", "-i"] + cmd                  # the Mac stays awake while the run is going
@@ -182,7 +196,8 @@ def start(conn, game_id, steps, duration_s=None):
         with open(log_file, "ab") as lf:
             header = (f"=== Game logger run: game {game_id} ({g['title']})  {_now()}\n"
                       f"=== Stages: {', '.join(steps)}" + (f"   TEST RUN: first {duration_s} seconds only (results are kept in separate test files)" if duration_s else "") + "\n"
-                      f"=== {shown_cmd}\n" + "".join(f"=== Note: {n}\n" for n in notes) + "\n")
+                      + (f"=== Annotated background: {bg}\n" if "annotation" in steps else "")
+                      + f"=== {shown_cmd}\n" + "".join(f"=== Note: {n}\n" for n in notes) + "\n")
             lf.write(header.encode("utf-8"))
         logf = open(log_file, "ab")
         try:
@@ -193,6 +208,7 @@ def start(conn, game_id, steps, duration_s=None):
             raise repo.ValidationError(f"Could not start the run: {e}")
         logf.close()
         meta = {"id": base, "game_id": game_id, "title": g["title"], "steps": steps, "duration_s": duration_s, "test": bool(duration_s),
+                "annotate_background": bg if "annotation" in steps else None,
                 "started": _now(), "ended": None, "exit_code": None, "status": "running", "pid": proc.pid,
                 "log_file": log_file, "meta_file": meta_file, "notes": notes, "stop_requested": False}
         _run["meta"], _run["proc"] = meta, proc

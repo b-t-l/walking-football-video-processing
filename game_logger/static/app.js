@@ -218,8 +218,18 @@ async function gamePage(id) {
       <button type="button" id="ex-add" style="margin-top:8px">+ Add exclusion</button>`;
 
   const savedSteps = (() => { try { return JSON.parse(localStorage.getItem("gl-run-steps") || "null"); } catch (e) { return null; } })() || ["detections", "transformations", "annotation"];
+  const savedAnnotateBg = (() => { try { return localStorage.getItem("gl-annotate-bg") || "analysis"; } catch (e) { return "analysis"; } })();
+  const hasEditedVideo = !!(g.videos && g.videos.edited && g.videos.edited.exists);
+  const annotateBg = (savedAnnotateBg === "edited" && hasEditedVideo) ? "edited" : "analysis";
   const runBody = isNew ? "" : `
       <div class="run-steps">${RUN_STEPS.map(([k, l, h]) => `<label class="run-step"><input type="checkbox" data-step="${k}" ${savedSteps.includes(k) ? "checked" : ""}> <b>${l}</b> <span class="small muted">${h}</span></label>`).join("")}</div>
+      <div class="run-annotate-bg" id="run-annotate-bg-row">
+        <label>Background video <select id="run-annotate-bg" style="width:auto">
+          <option value="analysis" ${annotateBg === "analysis" ? "selected" : ""}>Analysis video</option>
+          <option value="edited" ${annotateBg === "edited" ? "selected" : ""} ${hasEditedVideo ? "" : "disabled"}>Edited video${!hasEditedVideo ? " (none for this game)" : ""}</option>
+        </select></label>
+        <span class="small muted">Used when Annotated video is ticked. Edited draws only the header, dashboard and overhead map (no boxes or pitch outline).</span>
+      </div>
       <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
         <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
       <div class="row" style="margin-top:12px;gap:10px"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><span id="run-status" class="small"></span></div>
@@ -508,11 +518,24 @@ function setupRunPanel(g) {
   };
   const stepNames = r => (r.steps || []).map(k => (RUN_STEPS.find(x => x[0] === k) || [k, k])[1]).join(", ");
 
+  const syncAnnotateBg = () => {
+    const sel = $("run-annotate-bg"), row = $("run-annotate-bg-row");
+    if (!sel) return;
+    const annOn = !!document.querySelector('[data-step="annotation"]:checked');
+    sel.disabled = !annOn;
+    if (row) row.style.opacity = annOn ? "" : "0.55";
+    const editedOpt = sel.querySelector('option[value="edited"]');
+    if (editedOpt && editedOpt.disabled && sel.value === "edited") sel.value = "analysis";
+  };
+  document.querySelectorAll("[data-step]").forEach(el => el.addEventListener("change", syncAnnotateBg));
+  syncAnnotateBg();
+
   const showStatus = (r, pct) => {
     const mine = r && r.game_id === g.game_id, running = r && r.status === "running";
     $("run-go").disabled = !!running;
     $("run-stop").disabled = !(running && mine);
-    document.querySelectorAll("[data-step], #run-test, #run-mins").forEach(el => { el.disabled = !!running; });
+    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg").forEach(el => { el.disabled = !!running; });
+    if (!running) syncAnnotateBg();
     let txt = "", sum = "detections, reports and the annotated video";
     if (r) {
       const who = mine ? "" : `game ${r.game_id}: `;
@@ -566,6 +589,11 @@ function setupRunPanel(g) {
     try { localStorage.setItem("gl-run-steps", JSON.stringify(steps)); } catch (e) { /* ignore */ }
     const body = { steps };
     if ($("run-test").checked) body.duration_s = Math.max(1, Math.round(parseFloat($("run-mins").value || "2") * 60));
+    if (steps.includes("annotation")) {
+      const bg = ($("run-annotate-bg") && $("run-annotate-bg").value) || "analysis";
+      body.annotate_background = bg;
+      try { localStorage.setItem("gl-annotate-bg", bg); } catch (e) { /* ignore */ }
+    }
     try {
       const r = await api("POST", `/api/games/${g.game_id}/run`, body);
       mode = "current"; $("run-back").hidden = true; reset(); shownRun = r.run.id; lastStatus = "running";
