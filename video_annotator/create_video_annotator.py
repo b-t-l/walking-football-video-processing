@@ -52,7 +52,8 @@ class CreateVideoAnnotated:
 
     # How far below the lowest calibrated pitch point (the near touchline) the black bottom panel starts, in
     # pixels of the calibration image. Bigger = more margin under the pitch, smaller panel / overhead.
-    PANEL_CLEARANCE_PX = 40
+    # Modest clearance: room for the top timeline strip plus overhead map and team chips.
+    PANEL_CLEARANCE_PX = 35
 
     ######################## - INIT
     def __init__(self, 

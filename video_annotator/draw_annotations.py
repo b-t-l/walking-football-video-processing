@@ -21,19 +21,23 @@ REF_FRAME_HEIGHT = 2160
 REF_PANEL_TOP = 1300
 
 
-HEADER_TEXT_HEIGHT_FRAC = (0.026, 0.020, 0.016)   # capital-letter height of: 'Video Analysis', teams + score, date + description (share of video height)
-TOP_STRIP_FRAC = 0.15             # solid black strip across the top of the video behind the logo and text (share of video height; 0 = none)
-TOP_STRIP_FEATHER_FRAC = 0.0    # ... and how softly it fades into the video below it
-HEADER_HEADING_GAP = 0.30          # gap between 'Video Analysis' and the line under it, as a share of the heading's letter height (smaller = tighter)
-HEADER_MAX_WIDTH_FRAC = 0.36      # the text block is at most this wide (share of video width); the description wraps to 2 lines
+HEADER_TEXT_HEIGHT_FRAC = (0.015, 0.012, 0.009)  # capital-letter height of: 'Video Analysis', teams + score, date + description (share of video height)
+TOP_STRIP_FRAC = 0.12             # height of the top-left header box behind the logo and text (share of video height; 0 = none)
+TOP_STRIP_FEATHER_FRAC = 0.0      # soft fade below the header box (0 = hard edge); only applies under the box, not full-width
+HEADER_HEADING_GAP = 1.15          # gap between header lines, as a share of the heading's letter height (larger = more breathing room)
+HEADER_MAX_WIDTH_FRAC = 0.42      # the text block is at most this wide (share of video width); the description wraps to 2 lines
 HEADER_DESCRIPTION_LINES = 2
+HEADER_BOX_PAD_FRAC = 0.012       # padding inside the black header box (share of video height)
+HEADER_BOX_OPACITY = 0.7          # how solid the top-left header box is (1 = fully black, 0 = invisible)
+BOTTOM_PANEL_OPACITY = 0.7        # how solid the black bottom stats strip is (1 = fully black, 0 = invisible)
+TIMELINE_FRAC = 0.26              # share of the bottom panel height reserved at the top for the possession/goals/running strip
 TOP_MASK_FEATHER_FRAC = 0.10      # the black cover above the netting fades out over this share of the video height (0 = hard edge)
 _mask_cache = {}
 LOGO_FILE = "polis_logo.png"      # in the images folder; set to None to leave the logo off
-LOGO_HEIGHT_FRAC = 0.08           # logo height as a share of the video height (about the height of the three text lines beside it)
-LOGO_MARGIN_FRAC = 0.018          # gap from the top, as a share of the video height (only used when there is no black strip)
-LOGO_TEXT_GAP_FRAC = 0.028        # gap between the logo and the header text
-LOGO_LEFT_FRAC = 0.032            # gap from the left edge to the logo (the header text moves with it), as a share of the video height
+LOGO_HEIGHT_FRAC = 0.055          # logo height as a share of the video height (about the height of the three text lines beside it)
+LOGO_MARGIN_FRAC = 0.012          # gap from the top when no header box is drawn
+LOGO_TEXT_GAP_FRAC = 0.018        # gap between the logo and the header text
+LOGO_LEFT_FRAC = 0.018            # gap from the left edge to the logo (the header text moves with it), as a share of the video height
 _logo_cache = {}
 
 GOAL_BALL_D = 0.40                       # diameter of the football on the goal marker, as a share of the timeline strip's height
@@ -92,52 +96,35 @@ def compute_bottom_layout(frame, panel_top_fraction, pitch_length_m, pitch_width
     Where everything in the black bottom panel goes, for a panel that starts at row panel_top
     (panel_top_fraction = how far down the frame it starts, 0-1, chosen just below the pitch so the
     whole pitch stays visible in the video above it).
-    The overhead inset takes as much of the panel's height as it can at the pitch's true aspect
-    ratio, the team counts sit to its right and the frame/time text on the far right.
+    A possession/goals/running timeline strip sits across the top of the panel; the overhead inset
+    and stats table share the space below it (overhead kept inside the black strip).
     Returns None when panel_top_fraction is None -> callers fall back to the legacy fixed layout.
     """
     if panel_top_fraction is None:
         return None
+    _ = pitch_outline_frac  # kept on the signature for callers; overhead no longer grows into the video using it
     scale, width, height = frame_layout_scale(frame)
     panel_top = int(min(max(panel_top_fraction * height, 0.5 * height), 0.95 * height))
-    margin = max(4, int(24 * scale))
-    inset_h = max(20, height - panel_top - 2 * margin)
+    margin = max(4, int(20 * scale))
+    panel_h = max(40, height - panel_top)
+    timeline_h = max(16, int(panel_h * TIMELINE_FRAC))
+    content_top = panel_top + timeline_h + margin          # overhead + stats start below the timeline
+    # Keep the overhead map inside the remaining panel space (do not grow it up into the video).
+    inset_h = max(20, height - content_top - margin)
     inset_w = int(round(inset_h * pitch_length_m / pitch_width_m))
     max_w = int(0.5 * width)
     if inset_w > max_w:
         inset_w = max_w
         inset_h = int(round(inset_w * pitch_width_m / pitch_length_m))
     inset_x = margin
-    inset_y = panel_top + margin
-
-    # GROW THE OVERHEAD: the video below the near touchline curves away at the bottom-left (that corner is just
-    # surround/netting), so the overhead may reach up into the video there as long as it never covers the pitch.
-    # pitch_outline_frac = the pitch boundary as fractions of the frame (x/width, y/height).
-    if pitch_outline_frac is not None and len(pitch_outline_frac):
-        outline = np.asarray(pitch_outline_frac, dtype=float) * np.array([width, height], dtype=float)
-        clearance = max(6, int(0.015 * height))
-        aspect = pitch_length_m / pitch_width_m
-        y_bottom = height - margin
-        best_h = inset_h
-        for h in range(inset_h, int(0.5 * height) + 1, 2):
-            w = int(round(h * aspect))
-            if w > max_w:
-                break
-            y0, x1 = y_bottom - h, inset_x + w
-            covers_pitch = ((outline[:, 0] >= inset_x - clearance) & (outline[:, 0] <= x1 + clearance)
-                            & (outline[:, 1] >= y0 - clearance)).any()
-            if covers_pitch:
-                break
-            best_h = h
-        inset_h = best_h
-        inset_w = int(round(inset_h * aspect))
-        inset_y = y_bottom - inset_h
+    inset_y = content_top
     return {
         'panel_top': panel_top, 'margin': margin,
+        'timeline_h': timeline_h, 'content_top': content_top,
         'inset_x': inset_x, 'inset_y': inset_y, 'inset_w': inset_w, 'inset_h': inset_h,
-        # text sits inside the black panel (never straddling its top edge), even when the overhead grew above it
-        'stats_x': inset_x + inset_w + 3 * margin, 'stats_y': panel_top + margin,
-        'details_x': width - int(560 * scale), 'details_y': panel_top + margin + max(14, int(30 * scale)),
+        # stats sit level with the overhead inset, under the timeline
+        'stats_x': inset_x + inset_w + 3 * margin, 'stats_y': content_top,
+        'details_x': width - int(560 * scale), 'details_y': content_top + max(14, int(30 * scale)),
     }
 
 
@@ -180,22 +167,46 @@ def top_mask_keep(frame, polygon, feather_frac=None):
     return _mask_cache[key]
 
 
+def _blend_black(roi, opacity):
+    """Darken `roi` toward black by `opacity` (1 = fully black, 0 = unchanged). Modifies and returns roi."""
+    opacity = float(np.clip(opacity, 0.0, 1.0))
+    if opacity <= 0:
+        return roi
+    if opacity >= 1:
+        roi[:] = 0
+        return roi
+    roi[:] = (roi.astype(np.float32) * (1.0 - opacity)).astype(np.uint8)
+    return roi
+
+
+def apply_header_backdrop(frame, box_w, box_h, opacity=None):
+    """Black box in the top-left behind the logo and header text (not a full-width bar). Soft fade only under the box."""
+    if box_w < 2 or box_h < 2:
+        return frame
+    opacity = HEADER_BOX_OPACITY if opacity is None else opacity
+    h, w = frame.shape[:2]
+    box_w = min(box_w, w)
+    box_h = min(box_h, h)
+    feather = int(h * TOP_STRIP_FEATHER_FRAC)
+    _blend_black(frame[:box_h, :box_w], opacity)
+    if feather >= 2:
+        rows = min(feather, h - box_h)
+        if rows > 0:
+            t = np.linspace(0.0, 1.0, rows, dtype=np.float32)
+            # fade from the box opacity down to a clear video
+            fade = (opacity * (1.0 - (t * t * (3.0 - 2.0 * t))))[:, None, None]
+            band = frame[box_h:box_h + rows, :box_w].astype(np.float32)
+            frame[box_h:box_h + rows, :box_w] = (band * (1.0 - fade)).astype(np.uint8)
+    return frame
+
+
 def apply_top_strip(frame):
-    """Black strip across the top (behind the logo and header text) with a soft lower edge. Cached per frame height."""
-    h = frame.shape[0]
-    strip_h, feather = int(h * TOP_STRIP_FRAC), int(h * TOP_STRIP_FEATHER_FRAC)
+    """Legacy full-width top strip. Prefer apply_header_backdrop via draw_header_block."""
+    h, w = frame.shape[:2]
+    strip_h = int(h * TOP_STRIP_FRAC)
     if strip_h < 2:
         return frame
-    key = ("strip", h, strip_h, feather)
-    if key not in _mask_cache:
-        rows = strip_h + feather
-        t = np.clip((np.arange(rows, dtype=np.float32) - strip_h) / max(1, feather), 0.0, 1.0)
-        _mask_cache[key] = (t * t * (3.0 - 2.0 * t))[:, None, None].copy()
-        if len(_mask_cache) > 6:
-            _mask_cache.pop(next(iter(_mask_cache)))
-    keep = _mask_cache[key]
-    frame[:keep.shape[0]] = (frame[:keep.shape[0]].astype(np.float32) * keep).astype(np.uint8)
-    return frame
+    return apply_header_backdrop(frame, w, strip_h)
 
 
 def apply_top_mask(frame, polygon):
@@ -231,15 +242,13 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
         # Use numpy operations where possible
         annotation_frame = frame.copy()
 
-        # Black panel under the pitch map. Rows are [y1:y2], columns are [x1:x2].
-        annotation_frame[panel_top:frame_height, 0:frame_width] = 0
+        # Black panel under the pitch map (semi-transparent so a little of the video shows through).
+        _blend_black(annotation_frame[panel_top:frame_height, 0:frame_width], BOTTOM_PANEL_OPACITY)
 
         # Black out the netting: everything above the line clicked along its lower edge (Pitch Calibrator).
         if top_mask_polygon is not None:
             annotation_frame = apply_top_mask(annotation_frame, top_mask_polygon)
-        annotation_frame = apply_top_strip(annotation_frame)
-        
-        
+
         # Apply annotations (consider vectorizing these operations)
         if field_overlays:
             annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
@@ -250,24 +259,21 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
         if not (d is not None and draw_dashboard(annotation_frame, frame_id, data, DASHBOARD, layout, ORIGINAL_VIDEO_FPS, DETECTION_FPS, d)):
             annotation_frame = draw_stats(annotation_frame, data, layout=layout)
             annotation_frame = draw_video_details(annotation_frame, frame_id, data, DETECTION_FPS, ORIGINAL_VIDEO_FPS, layout)
-        # top: black strip, then the logo and the header text on it (teams with the live score as the game name)
-        annotation_frame = draw_logo(annotation_frame)
+        # top-left: black box behind logo + header text only (not a full-width bar)
         live_title = None
         if d is not None and HEADER:
             a_name, b_name = DASHBOARD.teams
             live_title = f"{a_name}  {d['score'][0]} - {d['score'][1]}  {b_name}" if d.get("score") is not None else f"{a_name} vs {b_name}"
-        annotation_frame = draw_header(annotation_frame, HEADER, live_title)
+        annotation_frame = draw_header_block(annotation_frame, HEADER, live_title)
         
         annotation_frames.append(annotation_frame)
     
     return annotation_frames
 
-def draw_logo(frame):
-    """Club logo in the top-left corner (images/polis_logo.png, transparent background). Silently skipped if missing."""
+def _ensure_logo(logo_h):
+    """Load/resize the club logo into _logo_cache. Returns (rgb, alpha) or None."""
     if not LOGO_FILE:
-        return frame
-    h, w = frame.shape[:2]
-    logo_h = max(8, int(h * LOGO_HEIGHT_FRAC))
+        return None
     if logo_h not in _logo_cache:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images", LOGO_FILE)
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -277,19 +283,7 @@ def draw_logo(frame):
             logo_w = max(1, int(img.shape[1] * logo_h / img.shape[0]))
             small = cv2.resize(img, (logo_w, logo_h), interpolation=cv2.INTER_AREA)
             _logo_cache[logo_h] = (small[..., :3].astype(np.float32), small[..., 3:4].astype(np.float32) / 255.0)
-    cached = _logo_cache[logo_h]
-    if cached is None:
-        return frame
-    rgb, alpha = cached
-    m = int(h * LOGO_MARGIN_FRAC)
-    lx = int(h * LOGO_LEFT_FRAC)
-    strip_h = int(h * TOP_STRIP_FRAC)
-    ty = (strip_h - rgb.shape[0]) // 2 if strip_h >= rgb.shape[0] else m      # centred vertically in the black strip
-    y1, x1 = min(ty + rgb.shape[0], h), min(lx + rgb.shape[1], w)
-    rgb, alpha = rgb[:y1 - ty, :x1 - lx], alpha[:y1 - ty, :x1 - lx]
-    roi = frame[ty:y1, lx:x1].astype(np.float32)
-    frame[ty:y1, lx:x1] = (rgb * alpha + roi * (1.0 - alpha)).astype(np.uint8)
-    return frame
+    return _logo_cache[logo_h]
 
 
 def _wrap_text(text, fs, th, max_w, max_lines):
@@ -315,43 +309,96 @@ def _wrap_text(text, fs, th, max_w, max_lines):
     return lines
 
 
-def draw_header(frame, header, live_title=None):
-    """'Video Analysis', the teams with the live score, and the date + description, to the right of the logo (top-left).
-    The lines are equally spaced and the block is centred vertically in the black strip (like the logo). White text with a
-    dark outline so it reads over black and over the video alike. live_title replaces the game name."""
+def _header_content(frame, header, live_title=None):
+    """Measure the top-left header: logo, text lines, and the black box that should sit behind them."""
+    h, w = frame.shape[:2]
+    pad = max(4, int(h * HEADER_BOX_PAD_FRAC))
+    logo_h = max(8, int(h * LOGO_HEIGHT_FRAC))
+    logo = _ensure_logo(logo_h)
+    lx = int(h * LOGO_LEFT_FRAC)
+    logo_w = logo[0].shape[1] if logo else 0
+    x0 = lx + (logo_w + int(h * LOGO_TEXT_GAP_FRAC) if logo else 0)
+    max_w = max(80, int(w * HEADER_MAX_WIDTH_FRAC) - x0)
+    caps = [max(6, int(h * f)) for f in HEADER_TEXT_HEIGHT_FRAC]
+    detail = "  |  ".join(x for x in ((header or {}).get("date"), (header or {}).get("description")) if x) if header else ""
+    gap = max(int(h * 0.008), int(caps[0] * HEADER_HEADING_GAP))  # breathing room between the three header lines
+    lines = []
+    if header:
+        for text, colour, k, max_lines in (
+            (header.get("heading"), (2, 202, 254), 0, 1),
+            (live_title or header.get("title"), (255, 255, 255), 1, 1),
+            (detail, (200, 200, 200), 2, HEADER_DESCRIPTION_LINES),
+        ):
+            if not text:
+                continue
+            fs = _fit(caps[k])
+            th = max(1, int(round(caps[k] / 14.0)))
+            for line in _wrap_text(text, fs, th, max_w, max_lines):
+                lines.append((line, colour, k, fs, th))
+    text_w = max((_text_w(line, fs, th) for line, _, _, fs, th in lines), default=0)
+    text_h = 0
+    if lines:
+        text_h = caps[lines[0][2]] + sum(gap + caps[k] for _, _, k, _, _ in lines[1:])
+    content_h = max(logo_h if logo else 0, text_h)
+    box_h = max(int(h * TOP_STRIP_FRAC), content_h + 2 * pad) if (logo or lines) and TOP_STRIP_FRAC > 0 else 0
+    box_w = (lx + max(logo_w, 0) + (int(h * LOGO_TEXT_GAP_FRAC) if logo and lines else 0) + text_w + pad) if (logo or lines) else 0
+    if box_w:
+        box_w = min(w, box_w + pad)
+    return {
+        "pad": pad, "logo": logo, "lx": lx, "logo_h": logo_h, "x0": x0,
+        "caps": caps, "gap": gap, "lines": lines, "text_h": text_h,
+        "box_w": box_w, "box_h": box_h, "content_h": content_h,
+    }
+
+
+def draw_logo(frame, layout=None):
+    """Club logo in the top-left corner (images/polis_logo.png). Silently skipped if missing."""
+    h, w = frame.shape[:2]
+    layout = layout or _header_content(frame, None)
+    cached = layout["logo"]
+    if cached is None:
+        return frame
+    rgb, alpha = cached
+    lx = layout["lx"]
+    box_h = layout["box_h"] or int(h * TOP_STRIP_FRAC)
+    m = int(h * LOGO_MARGIN_FRAC)
+    ty = (box_h - rgb.shape[0]) // 2 if box_h >= rgb.shape[0] else m
+    y1, x1 = min(ty + rgb.shape[0], h), min(lx + rgb.shape[1], w)
+    rgb, alpha = rgb[:y1 - ty, :x1 - lx], alpha[:y1 - ty, :x1 - lx]
+    roi = frame[ty:y1, lx:x1].astype(np.float32)
+    frame[ty:y1, lx:x1] = (rgb * alpha + roi * (1.0 - alpha)).astype(np.uint8)
+    return frame
+
+
+def draw_header(frame, header, live_title=None, layout=None):
+    """'Video Analysis', teams + score, and date + description to the right of the logo."""
     if not header:
         return frame
-    h, w = frame.shape[:2]
-    m = int(h * LOGO_MARGIN_FRAC)
-    logo = _logo_cache.get(max(8, int(h * LOGO_HEIGHT_FRAC)))
-    x0 = int(h * LOGO_LEFT_FRAC) + (logo[0].shape[1] + int(h * LOGO_TEXT_GAP_FRAC) if logo else 0)
-    max_w = int(w * HEADER_MAX_WIDTH_FRAC) - x0
-    if max_w < 100:
-        return frame
-    caps = [max(6, int(h * f)) for f in HEADER_TEXT_HEIGHT_FRAC]
-    detail = "  |  ".join(x for x in (header.get("date"), header.get("description")) if x)
-    gap = max(2, int(caps[0] * HEADER_HEADING_GAP))   # the same space between every line: from the line above's baseline to the top of the next
-    lines = []                                         # (text, colour, level, font scale, thickness)
-    for text, colour, k, max_lines in ((header.get("heading"), (2, 202, 254), 0, 1),
-                                       (live_title or header.get("title"), (255, 255, 255), 1, 1),
-                                       (detail, (200, 200, 200), 2, HEADER_DESCRIPTION_LINES)):
-        if not text:
-            continue
-        fs = _fit(caps[k])
-        th = max(1, int(round(caps[k] / 14.0)))
-        for line in _wrap_text(text, fs, th, max_w, max_lines):
-            lines.append((line, colour, k, fs, th))
+    h = frame.shape[0]
+    layout = layout or _header_content(frame, header, live_title)
+    lines, caps, gap = layout["lines"], layout["caps"], layout["gap"]
     if not lines:
         return frame
-    block_h = caps[lines[0][2]] + sum(gap + caps[k] for _, _, k, _, _ in lines[1:])
-    strip_h = int(h * TOP_STRIP_FRAC)
-    top = (strip_h - block_h) // 2 if strip_h >= block_h else m     # centred in the strip (else the old top margin)
+    x0 = layout["x0"]
+    box_h = layout["box_h"] or int(h * TOP_STRIP_FRAC)
+    m = int(h * LOGO_MARGIN_FRAC)
+    top = (box_h - layout["text_h"]) // 2 if box_h >= layout["text_h"] else m
     y = top + caps[lines[0][2]]
     for i, (line, colour, k, fs, th) in enumerate(lines):
         if i:
             y += gap + caps[k]
         cv2.putText(frame, line, (x0, y), _FONT, fs, (0, 0, 0), th + 3, cv2.LINE_AA)
         cv2.putText(frame, line, (x0, y), _FONT, fs, colour, th + (1 if k == 0 else 0), cv2.LINE_AA)
+    return frame
+
+
+def draw_header_block(frame, header, live_title=None):
+    """Top-left black box sized to the logo + text, then the logo and header lines on top of it."""
+    layout = _header_content(frame, header, live_title)
+    if layout["box_w"] > 0 and layout["box_h"] > 0:
+        apply_header_backdrop(frame, layout["box_w"], layout["box_h"])
+    draw_logo(frame, layout)
+    draw_header(frame, header, live_title, layout)
     return frame
 
 # Original function maintained for backward compatibility
@@ -968,7 +1015,7 @@ def draw_stats(frame, data, padding_top=20, padding_bottom=20, font_scale=1.5, l
 
 
 ############################################### LIVE DASHBOARD: right of the overhead map (numbers come from dashboard.LiveDashboard)
-DASH_COLUMNS = ("Possession", "Last 2 min", "Distance", "Running", "Top speed (1 s)")
+DASH_COLUMNS = ("Players", "Possession", "Last 2 min", "Distance", "Running", "Top speed (1 s)")
 DASH_MIN_W, DASH_MIN_H = 520, 110          # (at 3840 wide) smaller than this and the plain team boxes are used instead
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _TEXT_H1 = cv2.getTextSize("Hg", _FONT, 1.0, 1)[0][1]
@@ -1084,73 +1131,88 @@ def draw_run_line(frame, x, y_top, y_bottom):
 
 
 def draw_dashboard(frame, frame_id, data, dash, layout, video_fps=None, detection_fps=None, d=None):
-    """Score / clock line, a small table (one row per team: possession, last 2 minutes, distance, running spells, top speed)
-    and the possession timeline. Returns False (nothing drawn) when the panel is too small, so the caller can fall back."""
+    """Possession/goals/running timeline across the top of the HUD, then clock + team stats below.
+    Returns False (nothing drawn) when the panel is too small, so the caller can fall back."""
     scale, W, H = frame_layout_scale(frame)
-    x0, x1 = layout['stats_x'], W - layout['margin']          # the panel runs to the right edge: the frame details now sit in its headline row
-    y0, y1 = layout['panel_top'] + layout['margin'], H - layout['margin']
-    if (x1 - x0) < DASH_MIN_W * scale or (y1 - y0) < DASH_MIN_H * scale:
+    margin = layout['margin']
+    x0, x1 = layout['stats_x'], W - margin
+    content_y0 = layout.get('content_top', layout['panel_top'] + margin)
+    y1 = H - margin
+    if (x1 - x0) < DASH_MIN_W * scale or (y1 - content_y0) < DASH_MIN_H * scale:
         return False
     d = d if d is not None else dash.at(frame_id)
-    total = y1 - y0
-    gap = max(3, int(total * 0.03))
-    hl_h, hdr_h, row_h = int(total * 0.17), int(total * 0.10), int(total * 0.21)
-    tl_h = max(8, total - hl_h - hdr_h - 2 * row_h - 4 * gap)
-    th = max(1, int(round(total / 90)))
+    tl_h = layout.get('timeline_h') or max(16, int((H - layout['panel_top']) * TIMELINE_FRAC))
+    total = y1 - content_y0
+    gap = max(3, int(total * 0.028))
+    hl_h = int(total * 0.20)
+    hdr_h = int(total * 0.12)
+    row_h = max(12, (total - hl_h - hdr_h - 3 * gap) // 2)
+    th = max(1, int(round((y1 - layout['panel_top']) / 90)))
 
-    # ---- headline: game clock, then the video time / frame id / detection fps (the teams and score are in the header at the top)
-    fs = _fit(hl_h * 0.62)
-    base = y0 + int(hl_h * 0.80)
+    # ---- timeline across the full panel width at the top of the HUD
+    ty = layout['panel_top'] + max(2, margin // 2)
+    tl_x0, tl_x1 = margin, W - margin
+    tw = max(2, tl_x1 - tl_x0)
+    # leave a thin gap under the strip before the overhead / stats
+    usable_tl = min(tl_h - max(2, margin // 2), content_y0 - ty - 2)
+    usable_tl = max(12, usable_tl)
+    frame[ty:ty + usable_tl, tl_x0:tl_x0 + tw] = _timeline_image(dash, tw, usable_tl)
+    span = max(dash.end - dash.start, 1.0)
+    for t_run in getattr(dash, "run_marks", []):                    # running first, so a goal marker sits on top if they coincide
+        draw_run_line(frame, tl_x0 + int(min(max((t_run - dash.start) / span, 0), 1) * (tw - 1)), ty, ty + usable_tl)
+    for g in dash.goals if d["score"] is not None else []:
+        gx = tl_x0 + int(min(max((g["t"] - dash.start) / span, 0), 1) * (tw - 1))
+        draw_goal_flag(frame, gx, ty, ty + usable_tl, dash.colour_light[g["team"]])
+    nx = tl_x0 + int(min(max((d["t"] - dash.start) / span, 0), 1) * (tw - 1))
+    cv2.line(frame, (nx, ty - 3), (nx, ty + usable_tl + 3), (255, 255, 255), max(2, th), cv2.LINE_AA)
+
+    # ---- headline: game clock, then frame id / detection fps (same size/colour as the column headers below)
+    fs_h = _fit(hdr_h * 0.55)                     # shared with Players / Possession / ...
+    hdr_colour = (165, 165, 165)
+    fs = _fit(hl_h * 0.66)
+    base = content_y0 + int(hl_h * 0.90)
     cv2.putText(frame, d["phase"], (x0, base), _FONT, fs, (255, 255, 255), th + 1, cv2.LINE_AA)
-    if video_fps:
-        info = f"Video {TimeUtils.frame_to_timestamp(frame_id, video_fps)}   |   Frame id: {frame_id}"
-        if detection_fps:
-            info += f"   |   Detection fps: {detection_fps}"
-        fs_info = _fit(hl_h * 0.40)
-        cv2.putText(frame, info, (x0 + _text_w(d["phase"], fs, th + 1) + int(60 * scale), base), _FONT, fs_info, (190, 190, 190), max(1, th), cv2.LINE_AA)
+    info_parts = [f"Frame id: {frame_id}"]
+    if detection_fps:
+        info_parts.append(f"Detection fps: {detection_fps}")
+    info = "   |   ".join(info_parts)
+    cv2.putText(frame, info, (x0 + _text_w(d["phase"], fs, th + 1) + int(60 * scale), base),
+                _FONT, fs_h, hdr_colour, max(1, th - 1), cv2.LINE_AA)
 
-    # ---- rows: team box (as before) + the numbers
+    # ---- rows: team box + the numbers
     counts = {}
     for e in data:
         if e.get('class_name') == 'player' and e.get('team') not in ('Goalkeeper', 'Referee'):
             counts[e['team']] = counts.get(e['team'], 0) + 1
-    fs_chip = _fit(row_h * 0.46)
-    chip_texts = [f"{t['name']}: {counts.get(t['label'], 0)} players" for t in d["teams"]]
-    chip_w = max(_text_w(c, fs_chip, th + 1) for c in chip_texts) + int(row_h * 0.5)
+    # Team-name chip only; player count is its own column with the other stats
+    fs_chip = _fit(row_h * 0.28)
+    chip_texts = [t["name"] for t in d["teams"]]
+    chip_pad_x = max(8, int(row_h * 0.28))
+    chip_w = max(_text_w(c, fs_chip, th + 1) for c in chip_texts) + 2 * chip_pad_x
     cx0 = x0 + chip_w + int(40 * scale)
     col_w = max(1.0, (x1 - cx0) / len(DASH_COLUMNS))
-    fs_h = _fit(hdr_h * 0.55)
-    hdr_y = y0 + hl_h + gap + int(hdr_h * 0.85)
+    hdr_y = content_y0 + hl_h + gap + int(hdr_h * 0.85)
     for c, name in enumerate(DASH_COLUMNS):
-        cv2.putText(frame, name, (int(cx0 + c * col_w), hdr_y), _FONT, fs_h, (165, 165, 165), max(1, th - 1), cv2.LINE_AA)
-    fs_v = _fit(row_h * 0.46)
+        cv2.putText(frame, name, (int(cx0 + c * col_w), hdr_y), _FONT, fs_h, hdr_colour, max(1, th - 1), cv2.LINE_AA)
+    fs_v = _fit(row_h * 0.44)
     for k, t in enumerate(d["teams"]):
-        ry = y0 + hl_h + gap + hdr_h + gap + k * (row_h + gap)
+        ry = content_y0 + hl_h + gap + hdr_h + gap + k * (row_h + gap)
         colour = t["colour"]
         cv2.rectangle(frame, (x0, ry), (x0 + chip_w, ry + row_h), colour, -1)
         if sum(colour) < 200:       # a black kit: a light edge so the box still shows on the black panel
             cv2.rectangle(frame, (x0, ry), (x0 + chip_w, ry + row_h), (150, 150, 150), 1)
-        cv2.putText(frame, chip_texts[k], (x0 + int(row_h * 0.25), ry + int(row_h * 0.68)), _FONT, fs_chip, get_contrasting_color(colour), th + 1, cv2.LINE_AA)
-        vals = [f"{t['poss']:.0f}%" if t["poss"] is not None else "-",
+        # centre the name in the chip (OpenCV baseline sits below the glyph centre)
+        (_, chip_text_h), baseline = cv2.getTextSize(chip_texts[k], _FONT, fs_chip, th + 1)
+        text_y = ry + (row_h + chip_text_h) // 2 - baseline // 2
+        cv2.putText(frame, chip_texts[k], (x0 + chip_pad_x, text_y), _FONT, fs_chip, get_contrasting_color(colour), th + 1, cv2.LINE_AA)
+        vals = [str(counts.get(t["label"], 0)),
+                f"{t['poss']:.0f}%" if t["poss"] is not None else "-",
                 f"{t['poss_recent']:.0f}%" if t["poss_recent"] is not None else "-",
                 f"{t['dist_km']:.2f} km" if t["dist_km"] > 0.005 else "-",
                 str(t["runs"]),
                 f"{t['top']:.1f} km/h" if t["top"] > 0 else "-"]
         for c, v in enumerate(vals):
             cv2.putText(frame, v, (int(cx0 + c * col_w), ry + int(row_h * 0.68)), _FONT, fs_v, (255, 255, 255), th + 1, cv2.LINE_AA)
-
-    # ---- timeline: possession over the game, now, and the goals
-    ty = y1 - tl_h
-    tw = max(2, x1 - x0)
-    frame[ty:ty + tl_h, x0:x0 + tw] = _timeline_image(dash, tw, tl_h)
-    span = max(dash.end - dash.start, 1.0)
-    for t_run in getattr(dash, "run_marks", []):                    # running first, so a goal marker sits on top if they coincide
-        draw_run_line(frame, x0 + int(min(max((t_run - dash.start) / span, 0), 1) * (tw - 1)), ty, ty + tl_h)
-    for g in dash.goals if d["score"] is not None else []:
-        gx = x0 + int(min(max((g["t"] - dash.start) / span, 0), 1) * (tw - 1))
-        draw_goal_flag(frame, gx, ty, ty + tl_h, dash.colour_light[g["team"]])
-    nx = x0 + int(min(max((d["t"] - dash.start) / span, 0), 1) * (tw - 1))
-    cv2.line(frame, (nx, ty - 3), (nx, ty + tl_h + 3), (255, 255, 255), max(2, th), cv2.LINE_AA)
     return True
 
 
