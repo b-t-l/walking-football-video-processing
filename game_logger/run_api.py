@@ -26,7 +26,7 @@ def _only_from_the_app(request: Request):
 def _public(meta):
     if not meta:
         return None
-    out = {k: meta.get(k) for k in ("id", "game_id", "title", "steps", "duration_s", "test", "annotate_background", "started", "ended", "exit_code", "status", "notes", "note")}
+    out = {k: meta.get(k) for k in ("id", "game_id", "title", "steps", "duration_s", "test", "annotate_background", "annotate_edited_pitch", "started", "ended", "exit_code", "status", "notes", "note")}
     out["log_shown"] = paths.shown(meta.get("log_file"))
     return out
 
@@ -46,7 +46,8 @@ def start_run(game_id: int, body: dict, request: Request, conn=Depends(_get_conn
     _only_from_the_app(request)
     try:
         meta = runner.start(conn, game_id, body.get("steps") or [], body.get("duration_s"),
-                            annotate_background=body.get("annotate_background"))
+                            annotate_background=body.get("annotate_background"),
+                            annotate_edited_pitch=body.get("annotate_edited_pitch"))
     except paths.GameFolderError as e:
         raise repo.ValidationError(str(e))
     return {"run": _public(meta)}

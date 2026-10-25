@@ -72,12 +72,21 @@ PITCH_DOT_RADIUS = 6            # corner dots (was 15)
 PITCH_DOT_ALPHA = 0.35
 PITCH_LINE_THICKNESS = 2
 PITCH_LINE_ALPHA = 0.30         # pitch outline, lower = more transparent (was 0.18)
+PITCH_THIRD_DOT_RADIUS = 3      # dotted third-lines: smaller than corner keypoints
+PITCH_THIRD_DOT_GAP = 14        # spacing along each third line (px at ~4K; scaled below)
 BOX_ALPHA_NORMAL = 0.12         # ordinary player box (team colour): barely there
 BOX_ALPHA_ORANGE = 0.75         # 10-15 km/h
 BOX_THICKNESS_RUNNING = 3       # red (>15 km/h) is fully opaque
 BRACKET_FRACTION = 0.28         # running boxes are corner brackets: each arm = this share of the box's shorter side
 BRACKET_MIN_PX, BRACKET_MAX_PX = 10, 34
 LABEL_FONT_SCALE = 0.6          # speed label shown only for running players
+# Speed bands shared by on-field brackets and overhead dots (BGR)
+SPEED_NEAR_RUN_KMH = 10.0       # above this (up to the run threshold): orange
+SPEED_NEAR_RUN_COLOUR = (0, 165, 255)
+SPEED_RUN_COLOUR = (0, 0, 255)  # at/above the game's running speed: red
+# Overhead speed halo: large soft ring so it reads on the small inset
+SPEED_RING_ALPHA = 0.75         # mostly solid, slight transparency so it glows on the pitch
+SPEED_RING_RADIUS_FRAC = 3.2    # outer radius as a multiple of the player-dot radius
 
 def draw_corner_brackets(img, x0, y0, x1, y1, color, thickness):
     arm = int(max(BRACKET_MIN_PX, min(BRACKET_MAX_PX, BRACKET_FRACTION * min(x1 - x0, y1 - y0))))
@@ -221,11 +230,15 @@ def apply_top_mask(frame, polygon):
 
 
 ############################################### DRAW ALL ANNOTATIONS: Draw all the annotations onto the video we want:
-def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None, DASHBOARD=None, HEADER=None, field_overlays=True):
+def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TEAMS, PITCH_DETECTION_OVERRIDE, DETECTION_FPS,ORIGINAL_VIDEO_FPS,GAME_RUNNING_SPEED, PITCH_LENGTH_M=46.0, PITCH_WIDTH_M=21.0, PITCH_OVERLAY=None, FOOT_PIXEL_FN=None, PANEL_TOP_FRACTION=None, PITCH_OUTLINE_FRAC=None, TOP_MASK_FRAC=None, DASHBOARD=None, HEADER=None, field_overlays=True, PITCH_THIRDS_FRAC=None, edited_pitch=None):
     """Process multiple frames in a batch for better performance.
 
     field_overlays=False (edited-video background): skip boxes, pitch outline and netting mask;
     still draw the overhead map, dashboard/header and top strip.
+
+    Layer order: video → bottom panel / analysis field overlays → edited pitch thirds → HUD
+    (overhead, dashboard, header). edited_pitch detects on the clean frame, then draws thirds
+    after the panel so lines sit on the pitch and under the HUD.
     """
     annotation_frames = []
 
@@ -235,12 +248,22 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
     top_mask_polygon = compute_top_mask_polygon(frames[0], TOP_MASK_FRAC) if field_overlays else None
     outline_px = (np.asarray(PITCH_OUTLINE_FRAC, dtype=float) * np.array([frame_width, frame_height], dtype=float)
                   if field_overlays and PITCH_OUTLINE_FRAC is not None and len(PITCH_OUTLINE_FRAC) else None)
+    thirds_px = None
+    if field_overlays and PITCH_THIRDS_FRAC:
+        thirds_px = [
+            np.asarray(line, dtype=float) * np.array([frame_width, frame_height], dtype=float)
+            for line in PITCH_THIRDS_FRAC if line
+        ]
     panel_top = layout['panel_top'] if layout else min(int(REF_PANEL_TOP * scale), frame_height)
 
     # Process frames in batch
     for frame_id, frame, data, pitch_points in zip(frame_ids, frames, data_batch, pitch_points_batch):
         # Use numpy operations where possible
         annotation_frame = frame.copy()
+
+        # Homography from the clean video (before panel / HUD cover any landmarks).
+        if edited_pitch is not None:
+            edited_pitch.update(frame)
 
         # Black panel under the pitch map (semi-transparent so a little of the video shows through).
         _blend_black(annotation_frame[panel_top:frame_height, 0:frame_width], BOTTOM_PANEL_OPACITY)
@@ -251,9 +274,14 @@ def draw_annotations_batch(frame_ids, frames, data_batch, pitch_points_batch, TE
 
         # Apply annotations (consider vectorizing these operations)
         if field_overlays:
-            annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px)
+            annotation_frame = draw_pitch_detection_on_field(annotation_frame, frame_id, pitch_points, outline_px, thirds_px)
             annotation_frame = draw_object_detections_on_field(annotation_frame, frame_id, data, pitch_points,GAME_RUNNING_SPEED, FOOT_PIXEL_FN)
-        annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY, layout)
+
+        # Edited/broadcast thirds: above the video (+ panel), below overhead / dashboard / header.
+        if edited_pitch is not None:
+            edited_pitch.draw_onto(annotation_frame)
+
+        annotation_frame = draw_pitch_top_view(annotation_frame, data, pitch_points, PITCH_LENGTH_M, PITCH_WIDTH_M, PITCH_OVERLAY, layout, GAME_RUNNING_SPEED)
         # live panel (clock/video time, team table, timeline) - or, if it cannot be drawn, the plain team boxes + the frame details on the right
         d = DASHBOARD.at(frame_id) if (DASHBOARD is not None and layout) else None
         if not (d is not None and draw_dashboard(annotation_frame, frame_id, data, DASHBOARD, layout, ORIGINAL_VIDEO_FPS, DETECTION_FPS, d)):
@@ -446,12 +474,14 @@ def is_point_left_or_right(pitch_keypoints, obj_x, obj_y):
         return 'centre'
     
 ##################################### -- draws the predicted pitch outline on the video
-def draw_pitch_detection_on_field(frame,frame_id,pitch_points,outline_px=None):
-    """Corner dots + pitch outline. outline_px = dense curved outline in frame pixels (follows the lens
-    curvature); without it the dots are joined by straight lines."""
+def draw_pitch_detection_on_field(frame,frame_id,pitch_points,outline_px=None,thirds_px=None):
+    """Corner dots + pitch outline (+ optional thirds-grid dotted lines). outline_px / thirds_px are
+    dense polylines in frame pixels (follow the lens curvature); without outline_px the corner dots
+    are joined by straight lines."""
 
     dots = frame.copy()
     lines = frame.copy()
+    scale, _, _ = frame_layout_scale(frame)
 
     for i in range(len(pitch_points)):
         name = pitch_points[i]['name']
@@ -467,6 +497,14 @@ def draw_pitch_detection_on_field(frame,frame_id,pitch_points,outline_px=None):
     if outline_px is not None:
         cv2.polylines(lines, [np.asarray(outline_px, dtype=np.int32).reshape(-1, 1, 2)], True,
                       (0, 255, 0), PITCH_LINE_THICKNESS, cv2.LINE_AA)
+
+    # Thirds grid (across + along): same green as the outline, dotted so they read as zones not edges
+    if thirds_px:
+        gap = max(8, int(PITCH_THIRD_DOT_GAP * scale))
+        radius = max(2, int(PITCH_THIRD_DOT_RADIUS * scale))
+        for line in thirds_px:
+            for cx, cy in dotted_points(np.asarray(line, dtype=np.float64), gap):
+                cv2.circle(lines, (int(round(cx)), int(round(cy))), radius, (0, 255, 0), -1, cv2.LINE_AA)
 
     cv2.addWeighted(lines, PITCH_LINE_ALPHA, frame, 1 - PITCH_LINE_ALPHA, 0, frame)
     cv2.addWeighted(dots, PITCH_DOT_ALPHA, frame, 1 - PITCH_DOT_ALPHA, 0, frame)
@@ -746,7 +784,7 @@ def grass_texture(w, h, pitch_length_m):
     return out
 
 
-def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_width_m=21.0, overlay=None, layout=None):
+def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_width_m=21.0, overlay=None, layout=None, GAME_RUNNING_SPEED=15.0):
 
     # Real-world rectangle dimensions for THIS game (legacy default 46x21 kept only for
     # backward compatibility with callers that don't pass a per-game size).
@@ -888,6 +926,8 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
 
     ball_positions = []
     player_circle_radius = max(3, int(25 * scale * ui))   # defined up front: the ball is drawn after the loop, which may not run
+    speed_halo_radius = max(player_circle_radius + 8, int(player_circle_radius * SPEED_RING_RADIUS_FRAC))
+    players_to_draw = []  # (cx, cy, team_colour, possession, run_ring) — speed halos first, then solid dots
     ## Draw the transformed points of players on the top view pitch:
     for object in data:
 
@@ -913,33 +953,43 @@ def draw_pitch_top_view(frame,data,pitch_points, pitch_length_m=46.0, pitch_widt
                 
                 # deal with colors
                 circle_color = PLAYER_COLOR
-                circle_text_color = PLAYER_TEXT_COLOR
                 if object["team_color"]:
                     circle_color = ast.literal_eval(object["team_color"])
-                    circle_text_color = get_contrasting_color(circle_color)
-                
-                # draw a slightly bigger red circle if they are in posession of the ball:
-                if object['ball_posession'] == True:
-                    cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius + max(1, int(5 * scale * ui)), (0,0,255), -1, cv2.LINE_AA)
 
-                # draw the player circle + tracker_id text
-                cv2.circle(frame, (map_position[0], final_position_y), player_circle_radius, circle_color, -1, cv2.LINE_AA)
-                #text_position = (map_position[0]-7,final_position_y+4)  # Slightly below the circle
-                #cv2.putText(
-                #    frame,
-                #    str(int(object['tracker_id'])),
-                #    text_position,
-                #    cv2.FONT_HERSHEY_SIMPLEX,
-                #    0.5,
-                #    circle_text_color,
-                #    2,
-                #    cv2.LINE_AA,
-                #)
+                # same speed bands as on-field brackets: orange near-running, red at/above running speed
+                speed = object.get('speed_km_per_hour')
+                if speed is None:
+                    speed = 0
+                run_threshold = float(GAME_RUNNING_SPEED) if GAME_RUNNING_SPEED else 15.0
+                run_ring = None
+                if speed > run_threshold:
+                    run_ring = SPEED_RUN_COLOUR
+                elif speed > SPEED_NEAR_RUN_KMH:
+                    run_ring = SPEED_NEAR_RUN_COLOUR
+
+                players_to_draw.append((
+                    map_position[0], final_position_y, circle_color,
+                    bool(object['ball_posession']), run_ring,
+                ))
 
             
             # the ball is collected here and drawn after every player, so it is never hidden under a player's dot
             if object['class_name'] == "ball":
                 ball_positions.append((map_position[0], final_position_y))
+
+    # Large soft speed rings first (translucent), then opaque team dots on top so the coloured
+    # annulus stays thick and readable on the small overhead inset.
+    if any(ring is not None for *_, ring in players_to_draw):
+        speed_overlay = frame.copy()
+        for cx, cy, _colour, _poss, run_ring in players_to_draw:
+            if run_ring is not None:
+                cv2.circle(speed_overlay, (cx, cy), speed_halo_radius, run_ring, -1, cv2.LINE_AA)
+        cv2.addWeighted(speed_overlay, SPEED_RING_ALPHA, frame, 1.0 - SPEED_RING_ALPHA, 0, frame)
+
+    for cx, cy, circle_color, possession, _run_ring in players_to_draw:
+        if possession:
+            cv2.circle(frame, (cx, cy), player_circle_radius + max(1, int(5 * scale * ui)), (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), player_circle_radius, circle_color, -1, cv2.LINE_AA)
 
     ball_radius = max(3, int(player_circle_radius * 0.55))
     for bx, by in ball_positions:

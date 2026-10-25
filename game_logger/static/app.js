@@ -219,6 +219,7 @@ async function gamePage(id) {
 
   const savedSteps = (() => { try { return JSON.parse(localStorage.getItem("gl-run-steps") || "null"); } catch (e) { return null; } })() || ["detections", "transformations", "annotation"];
   const savedAnnotateBg = (() => { try { return localStorage.getItem("gl-annotate-bg") || "analysis"; } catch (e) { return "analysis"; } })();
+  const savedEditedPitch = (() => { try { return localStorage.getItem("gl-annotate-edited-pitch") === "1"; } catch (e) { return false; } })();
   const hasEditedVideo = !!(g.videos && g.videos.edited && g.videos.edited.exists);
   const annotateBg = (savedAnnotateBg === "edited" && hasEditedVideo) ? "edited" : "analysis";
   const runBody = isNew ? "" : `
@@ -228,7 +229,12 @@ async function gamePage(id) {
           <option value="analysis" ${annotateBg === "analysis" ? "selected" : ""}>Analysis video</option>
           <option value="edited" ${annotateBg === "edited" ? "selected" : ""} ${hasEditedVideo ? "" : "disabled"}>Edited video${!hasEditedVideo ? " (none for this game)" : ""}</option>
         </select></label>
-        <span class="small muted">Used when Annotated video is ticked. Edited draws only the header, dashboard and overhead map (no boxes or pitch outline).</span>
+        <span class="small muted">Used when Annotated video is ticked. Edited draws the header, dashboard and overhead map (no boxes or analysis outline).</span>
+        <label id="run-edited-pitch-row" style="display:block;margin-top:8px">
+          <input type="checkbox" id="run-edited-pitch" ${savedEditedPitch ? "checked" : ""}>
+          <b>Pitch thirds on edited video</b>
+          <span class="small muted">Runs the pitch-keypoint model on every frame (slower). Only applies when Background is Edited.</span>
+        </label>
       </div>
       <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
         <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
@@ -462,6 +468,7 @@ const RUN_STEPS = [
   ["goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"],
   ["youtube_description", "YouTube description", "a .txt to paste into the YouTube description box: teams, date, the game's description, the start / half-time / end times and the goal estimates (build-up, goal, restart) as click-able time stamps; uses the Goal detection result (runs it first if there is none)"],
   ["ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, at the pitch edge, big and close to the camera, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"],
+  ["broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"],
 ];
 let runTimer = null;
 
@@ -520,21 +527,27 @@ function setupRunPanel(g) {
 
   const syncAnnotateBg = () => {
     const sel = $("run-annotate-bg"), row = $("run-annotate-bg-row");
+    const pitch = $("run-edited-pitch"), pitchRow = $("run-edited-pitch-row");
     if (!sel) return;
     const annOn = !!document.querySelector('[data-step="annotation"]:checked');
     sel.disabled = !annOn;
     if (row) row.style.opacity = annOn ? "" : "0.55";
     const editedOpt = sel.querySelector('option[value="edited"]');
     if (editedOpt && editedOpt.disabled && sel.value === "edited") sel.value = "analysis";
+    const pitchOn = annOn && sel.value === "edited";
+    if (pitch) pitch.disabled = !pitchOn;
+    if (pitchRow) pitchRow.style.opacity = pitchOn ? "" : "0.55";
   };
   document.querySelectorAll("[data-step]").forEach(el => el.addEventListener("change", syncAnnotateBg));
+  const _bgSel = $("run-annotate-bg");
+  if (_bgSel) _bgSel.addEventListener("change", syncAnnotateBg);
   syncAnnotateBg();
 
   const showStatus = (r, pct) => {
     const mine = r && r.game_id === g.game_id, running = r && r.status === "running";
     $("run-go").disabled = !!running;
     $("run-stop").disabled = !(running && mine);
-    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg").forEach(el => { el.disabled = !!running; });
+    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg, #run-edited-pitch").forEach(el => { el.disabled = !!running; });
     if (!running) syncAnnotateBg();
     let txt = "", sum = "detections, reports and the annotated video";
     if (r) {
@@ -591,8 +604,11 @@ function setupRunPanel(g) {
     if ($("run-test").checked) body.duration_s = Math.max(1, Math.round(parseFloat($("run-mins").value || "2") * 60));
     if (steps.includes("annotation")) {
       const bg = ($("run-annotate-bg") && $("run-annotate-bg").value) || "analysis";
+      const pitch = !!(bg === "edited" && $("run-edited-pitch") && $("run-edited-pitch").checked);
       body.annotate_background = bg;
+      body.annotate_edited_pitch = pitch;
       try { localStorage.setItem("gl-annotate-bg", bg); } catch (e) { /* ignore */ }
+      try { localStorage.setItem("gl-annotate-edited-pitch", pitch ? "1" : "0"); } catch (e) { /* ignore */ }
     }
     try {
       const r = await api("POST", `/api/games/${g.game_id}/run`, body);

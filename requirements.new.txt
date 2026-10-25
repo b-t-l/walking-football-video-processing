@@ -54,8 +54,8 @@ torch==2.14.1
 torchvision==0.29.1
 tqdm==4.70.1
 typing_extensions==4.16.0
-ultralytics==8.4.174
-ultralytics-platform==0.1.82
-ultralytics-thop==2.2.2
+ultralytics==8.4.188
+ultralytics-platform==0.1.94
+ultralytics-thop==2.2.3
 urllib3==2.8.0
 wheel==0.47.0

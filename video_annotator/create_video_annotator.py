@@ -70,7 +70,8 @@ class CreateVideoAnnotated:
                  ANNOTATED_PATH=None,
                  WORK_DIR=None,
                  BACKGROUND_VIDEO=None,
-                 FIELD_OVERLAYS=True):
+                 FIELD_OVERLAYS=True,
+                 EDITED_PITCH_THIRDS=False):
 
         print("-------------------------------------------------")
         print("CREATE VIDEO ANNOTATED: Creating video from database records")
@@ -78,6 +79,7 @@ class CreateVideoAnnotated:
         
 
         # BACKGROUND_VIDEO: analysis (default) or edited; FIELD_OVERLAYS False = header/dashboard/overhead only
+        # EDITED_PITCH_THIRDS: when edited background, optionally run the pitch-keypoint model (slower)
         self.INPUT_VIDEO_TITLE = BACKGROUND_VIDEO or GAME_RECORD['statistics_source_video']
         self.FIELD_OVERLAYS = bool(FIELD_OVERLAYS)
         self.START_TIME = TimeUtils.time_to_seconds(GAME_RECORD['game_start_seconds'])
@@ -94,8 +96,26 @@ class CreateVideoAnnotated:
         self.TEAMS = TEAMS
         self.GAME_RECORD = GAME_RECORD
         self.GAME_RUNNING_SPEED = float(GAME_RECORD['running_speed_km_h'])
+        self.edited_pitch = None
         if not self.FIELD_OVERLAYS:
-            print("   background: edited-style overlays only (header, dashboard, overhead map; no boxes or pitch outline)")
+            print("   background: edited-style overlays (header, dashboard, overhead map; no boxes or analysis outline)")
+            if EDITED_PITCH_THIRDS:
+                try:
+                    from edited_pitch_detector import EditedPitchAnnotator
+                    self.edited_pitch = EditedPitchAnnotator(
+                        game_record=GAME_RECORD,
+                        # keypoints on for now: weak model rarely gets a usable H, so dots show the
+                        # detector is firing; turn off once thirds are reliable after more training
+                        draw_keypoints=True,
+                        draw_outline=False,
+                        draw_status=True,
+                        hold_last_h=True,
+                    )
+                    print("   edited pitch thirds: ON (models/pitch → per-frame homography; keypoints+status drawn for debug)")
+                except Exception as e:
+                    print(f"   edited pitch thirds unavailable ({type(e).__name__}: {e})")
+            else:
+                print("   edited pitch thirds: OFF")
 
         #- Per-game pitch size for the top-view inset (drives transform_point_to_new_rectangle).
         #  Preferred: from this game's Pitch Calibrator export (pitch_calibrator_json), which
@@ -104,6 +124,7 @@ class CreateVideoAnnotated:
         #  hardcoded 46x21 for any game without a calibrator JSON yet.
         self.PANEL_TOP_FRACTION = None   # None = legacy fixed bottom panel (no calibration available)
         self.PITCH_OUTLINE_FRAC = None
+        self.PITCH_THIRDS_FRAC = None    # thirds-grid polylines (fractions), analysis only
         self.TOP_MASK_FRAC = None
         calibrator_json = GAME_RECORD.get('pitch_calibrator_json') if hasattr(GAME_RECORD, 'get') else None
         if isinstance(calibrator_json, str) and calibrator_json.strip():
@@ -139,6 +160,11 @@ class CreateVideoAnnotated:
             # pitch boundary in the frame (as fractions) so the overhead can grow without covering the pitch
             outline = _fitted.pitch_outline_pixels()
             self.PITCH_OUTLINE_FRAC = [(float(x) / _fitted.img_w, float(y) / _fitted.img_h) for x, y in outline]
+            # thirds grid: across (final thirds) + along (left/middle/right) — dotted green, lens-curved
+            self.PITCH_THIRDS_FRAC = [
+                [(float(x) / _fitted.img_w, float(y) / _fitted.img_h) for x, y in line]
+                for line in _fitted.pitch_third_lines_pixels()
+            ]
             # netting edge clicked in the Pitch Calibrator (optional): everything above it is blacked out
             self.TOP_MASK_FRAC = [(float(p['x']) / _fitted.img_w, float(p['y']) / _fitted.img_h)
                                   for p in (calibration.get('top_mask_points') or []) if p and p.get('x') is not None]
@@ -147,6 +173,7 @@ class CreateVideoAnnotated:
             self.PITCH_WIDTH_M = 21.0
             self.PITCH_OVERLAY = None
             self.FOOT_PIXEL_FN = None
+            self.PITCH_THIRDS_FRAC = None
 
         self.PITCH_DETECTION_OVERRIDE = PITCH_DETECTION_OVERRIDE
         self.DASHBOARD = None            # built after the database is open (see below)
@@ -440,6 +467,7 @@ class CreateVideoAnnotated:
                     
                     if has_objects:
                         # Draw annotations directly on the frame
+                        # (edited pitch thirds: detect on clean video, draw above panel / below HUD)
                         annotated_frames = draw_annotations.draw_annotations_batch(
                                 batch_frame_ids,
                                 batch_frames,
@@ -460,6 +488,8 @@ class CreateVideoAnnotated:
                                 self.DASHBOARD,
                                 self.HEADER,
                                 field_overlays=self.FIELD_OVERLAYS,
+                                PITCH_THIRDS_FRAC=self.PITCH_THIRDS_FRAC,
+                                edited_pitch=self.edited_pitch,
                         )
                         
                         # Convert annotated frames back to RGB for MoviePy
@@ -527,6 +557,11 @@ class CreateVideoAnnotated:
             estimated_remaining_seconds = estimated_remaining_time % 60  # Remaining seconds
 
             print(f"✅ Chunk completed in {time_taken:.2f} sec: Time remaining est: {int(estimated_remaining_minutes)}m {int(estimated_remaining_seconds)}s")
+            if self.edited_pitch is not None:
+                print(f"   edited pitch thirds so far: {self.edited_pitch.stats_summary()}")
+
+        if self.edited_pitch is not None:
+            print(f"edited pitch thirds: {self.edited_pitch.stats_summary()}")
         
         # COMBINE VIDEO CLIPSConcatenate all chunks using ffmpeg directly
         print("\n🔄 Concatenating chunks into 1 video: --------------------------------------------------------")

@@ -26,10 +26,12 @@ STEPS = [
     ("goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"),
     ("youtube_description", "YouTube description", "a .txt to paste into the YouTube description box: teams, date, the game's description, the start / half-time / end times and the goal estimates (build-up, goal, restart) as click-able time stamps; uses the Goal detection result (runs it first if there is none)"),
     ("ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, at the pitch edge, big and close to the camera, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"),
+    ("broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"),
 ]
 STEP_IDS = [s[0] for s in STEPS]
 NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
 NEEDS_READY = {"detections", "transformations", "annotation"}
+NEEDS_EDITED_VIDEO = {"broadcast_pitch_images"}
 
 POINTER = os.path.join(config.VIDEO_PROCESSING_DIR, "game-logger-current-run.json")
 _lock = threading.Lock()
@@ -130,7 +132,7 @@ def status():
         return dict(meta) if meta else None
 
 
-def start(conn, game_id, steps, duration_s=None, annotate_background=None):
+def start(conn, game_id, steps, duration_s=None, annotate_background=None, annotate_edited_pitch=None):
     steps = [s for s in STEP_IDS if s in set(steps or [])]       # keep the pipeline's own order
     if not steps:
         raise repo.ValidationError("Tick at least one stage to run")
@@ -147,13 +149,23 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None):
     bg = (annotate_background or "analysis").strip().lower() if annotate_background else "analysis"
     if bg not in ("analysis", "edited"):
         raise repo.ValidationError("Background video must be 'analysis' or 'edited'")
+    edited_pitch = bool(annotate_edited_pitch)
     if "annotation" not in steps:
         bg = "analysis"                                          # only used when annotation runs
+        edited_pitch = False
     elif bg == "edited":
         g_full = repo.get_game(conn, game_id)                    # need videos.edited from effective_video
         edited = (g_full.get("videos") or {}).get("edited") if g_full else None
         if not edited or not edited.get("exists"):
             raise repo.ValidationError("This game has no edited video, so Annotated video cannot use Edited as the background. Choose Analysis, or add the edited video on the game page.")
+    else:
+        edited_pitch = False                                     # pitch-keypoint thirds only apply to edited background
+
+    if NEEDS_EDITED_VIDEO & set(steps):
+        g_edit = repo.get_game(conn, game_id)
+        edited = (g_edit.get("videos") or {}).get("edited") if g_edit else None
+        if not edited or not edited.get("exists"):
+            raise repo.ValidationError("This game has no broadcast (edited) video, so Broadcast Video Pitch Training Images cannot run. Add the edited video on the game page first.")
 
     with _lock:
         cur = _refresh(_load_current())
@@ -176,7 +188,10 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None):
         if "annotation" in steps and "detections" not in steps:
             notes.append("Annotated video without Detections in this run: it uses the player pictures saved by the last detections run.")
         if "annotation" in steps and bg == "edited":
-            notes.append("Annotated video background: Edited (header, dashboard and overhead map only; no boxes or pitch outline).")
+            if edited_pitch:
+                notes.append("Annotated video background: Edited, with pitch thirds from the pitch-keypoint model (slower).")
+            else:
+                notes.append("Annotated video background: Edited (header, dashboard and overhead map; pitch thirds off).")
 
         folder = log_folder(game_id)
         os.makedirs(folder, exist_ok=True)
@@ -189,6 +204,8 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None):
             cmd += ["--duration", str(duration_s)]
         if "annotation" in steps:
             cmd += ["--annotate-background", bg]
+            if edited_pitch:
+                cmd += ["--annotate-edited-pitch"]
         shown_cmd = " ".join(cmd)
         if sys.platform == "darwin" and shutil.which("caffeinate"):
             cmd = ["caffeinate", "-i"] + cmd                  # the Mac stays awake while the run is going
@@ -196,7 +213,7 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None):
         with open(log_file, "ab") as lf:
             header = (f"=== Game logger run: game {game_id} ({g['title']})  {_now()}\n"
                       f"=== Stages: {', '.join(steps)}" + (f"   TEST RUN: first {duration_s} seconds only (results are kept in separate test files)" if duration_s else "") + "\n"
-                      + (f"=== Annotated background: {bg}\n" if "annotation" in steps else "")
+                      + (f"=== Annotated background: {bg}" + (f"  pitch thirds: {'ON' if edited_pitch else 'OFF'}" if bg == "edited" else "") + "\n" if "annotation" in steps else "")
                       + f"=== {shown_cmd}\n" + "".join(f"=== Note: {n}\n" for n in notes) + "\n")
             lf.write(header.encode("utf-8"))
         logf = open(log_file, "ab")
@@ -209,6 +226,7 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None):
         logf.close()
         meta = {"id": base, "game_id": game_id, "title": g["title"], "steps": steps, "duration_s": duration_s, "test": bool(duration_s),
                 "annotate_background": bg if "annotation" in steps else None,
+                "annotate_edited_pitch": bool(edited_pitch) if "annotation" in steps and bg == "edited" else False,
                 "started": _now(), "ended": None, "exit_code": None, "status": "running", "pid": proc.pid,
                 "log_file": log_file, "meta_file": meta_file, "notes": notes, "stop_requested": False}
         _run["meta"], _run["proc"] = meta, proc

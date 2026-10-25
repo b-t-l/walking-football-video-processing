@@ -57,8 +57,8 @@ torchvision==0.20.1
 #tqdm @ file:///private/var/folders/nz/j6p8yfhx1mv_0grj5xl4650h0000gp/T/abs_24zjwympsr/croot/tqdm_1724853942429/work
 #typing_extensions @ file:///private/var/folders/k1/30mswbxs7r1g6zwn8y4fyt500000gp/T/abs_0b3jpv_f79/croot/typing_extensions_1734714864260/work
 #tzdata @ file:///croot/python-tzdata_1690578112552/work
-ultralytics==8.3.61
-ultralytics-thop==2.0.13
+ultralytics==8.4.188
+ultralytics-thop==2.2.3
 #unicodedata2 @ file:///private/var/folders/k1/30mswbxs7r1g6zwn8y4fyt500000gp/T/abs_b99hn8t9lq/croot/unicodedata2_1736541774279/work
 #urllib3 @ file:///private/var/folders/nz/j6p8yfhx1mv_0grj5xl4650h0000gp/T/abs_06_m8gdsy6/croot/urllib3_1727769822458/work
 wheel==0.44.0

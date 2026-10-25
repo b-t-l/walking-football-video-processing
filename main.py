@@ -3,6 +3,7 @@ from video_annotator import CreateVideoAnnotated
 from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport
 from team_images import ExtractTeamImages
 from ball_images import ExtractBallImages
+from broadcast_pitch_images import ExtractBroadcastPitchImages
 from goal_detection import GoalDetection
 from youtube_description import YoutubeDescription
 from data import GetGameData
@@ -12,6 +13,7 @@ from track_stitcher import TrackStitcher
 from keeper_zone import KeeperZone
 from speed_and_distance_db_updater import SpeedDistanceUpdater
 from posession_db_updater import BallPosessionUpdater
+from direction_of_play import DirectionOfPlay
 from utils import *
 from team_assigner import Teams
 import os
@@ -34,6 +36,7 @@ def main():
     RUN_YOUTUBE_DESCRIPTION = False  # write the .txt to paste into the YouTube description (game details, times, goal estimates); uses the goal detection result
     RUN_GOAL_DETECTION = False  # find the restarts from the centre spot (a goal is followed by one) and compare with the score; needs Transformations done
     RUN_BALL_IMAGES = False  # save 40 full frames chosen to teach the ball detector where it fails (lost ball, false balls, small, fast...) for Roboflow
+    RUN_BROADCAST_PITCH_IMAGES = False  # save frames from the broadcast (edited) video for Roboflow pitch-keypoint labelling
     RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
     RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
 
@@ -49,16 +52,18 @@ def main():
     import argparse
     _ap = argparse.ArgumentParser()
     _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images, goal_detection, youtube_description')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
     _ap.add_argument('--annotate-background', choices=['analysis', 'edited'], default='analysis',
-                     help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard and overhead map only)')
+                     help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard, overhead map)')
+    _ap.add_argument('--annotate-edited-pitch', action='store_true',
+                     help='when background is edited: run the pitch-keypoint model and draw dotted thirds (slower)')
     _args, _unknown = _ap.parse_known_args()
     if _args.game is not None:
         GAME_ID = _args.game
     if _args.steps is not None:
         _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images', 'ball_images', 'goal_detection', 'youtube_description'}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description'}
         if _unknown_steps:
             raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
         RUN_DETECTIONS = 'detections' in _steps
@@ -69,9 +74,11 @@ def main():
         RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
         RUN_TEAM_IMAGES = 'team_images' in _steps
         RUN_BALL_IMAGES = 'ball_images' in _steps
+        RUN_BROADCAST_PITCH_IMAGES = 'broadcast_pitch_images' in _steps
         RUN_GOAL_DETECTION = 'goal_detection' in _steps
         RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
     ANNOTATE_BACKGROUND = _args.annotate_background or 'analysis'
+    ANNOTATE_EDITED_PITCH = bool(getattr(_args, 'annotate_edited_pitch', False))
     TEST_RUN = bool(_args.duration)
     if TEST_RUN:
         DURATION = _args.duration
@@ -149,7 +156,7 @@ def main():
         raise SystemExit(f"\nSTOPPED: the analysis video was not found: {GAME_RECORD['statistics_source_video']}\n"
                          "Put it in the game's videos folder as <game number>_analysis.mp4, or choose it on the game page in the game logger.\n")
 
-    # annotated video background: analysis (default, full overlays) or edited (header / dashboard / overhead only)
+    # annotated video background: analysis (default, full overlays) or edited (header / dashboard / overhead)
     ANNOTATE_BACKGROUND_VIDEO = GAME_RECORD['statistics_source_video']
     ANNOTATE_FIELD_OVERLAYS = True
     if RUN_ANNOTATION_VIDEO_CREATOR and ANNOTATE_BACKGROUND == 'edited':
@@ -171,7 +178,10 @@ def main():
                              + (f": {edited_path}" if edited_path else "")
                              + "\nPut it in the game's videos folder as <game number>_edited.mp4, or choose it on the game page, or use --annotate-background analysis.\n")
         ANNOTATE_BACKGROUND_VIDEO = edited_path
-        print(f"Annotated background: edited video (dashboard / header / overhead only): {ANNOTATE_BACKGROUND_VIDEO}")
+        _thirds = "pitch thirds ON" if ANNOTATE_EDITED_PITCH else "pitch thirds OFF"
+        print(f"Annotated background: edited video (dashboard / header / overhead; {_thirds}): {ANNOTATE_BACKGROUND_VIDEO}")
+    elif not RUN_ANNOTATION_VIDEO_CREATOR or ANNOTATE_BACKGROUND != 'edited':
+        ANNOTATE_EDITED_PITCH = False
 
     print('-------------------------- PROCESSING STARTED: ')
 
@@ -212,6 +222,9 @@ def main():
         db_ball_posession = BallPosessionUpdater(DATABASE_FILE,
                                                  GAME_RECORD)
         db_ball_posession.run()
+        # which way each team attacks (+x / -x): short sample at kick-off, flip at half-time if set; stored in the detections DB
+        DirectionOfPlay(DATABASE_FILE, GAME_RECORD,
+                        [GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")]).run()
 
 
     # - DETECTION REPORT: create report with detection statistics
@@ -261,6 +274,26 @@ def main():
                           GAME_RECORD,
                           n_frames=40).run()
 
+    # - BROADCAST VIDEO PITCH TRAINING IMAGES: frames from the edited / broadcast video for Roboflow pitch keypoints
+    if RUN_BROADCAST_PITCH_IMAGES == True:
+        broadcast_path = None
+        if GAME_SOURCE == 'database':
+            from game_logger import db as gl_db, repo as gl_repo
+            _conn = gl_db.connect()
+            try:
+                _g = gl_repo.get_game(_conn, GAME_ID)
+                broadcast_path = ((_g.get('videos') or {}).get('edited') or {}).get('path') if _g else None
+            finally:
+                _conn.close()
+        else:
+            from game_logger import paths as game_paths
+            broadcast_path = game_paths.conventional_video(GAME_ID, 'edited')
+        BROADCAST_PITCH_FOLDER = os.path.join(GAME_PATHS['folder'] if GAME_PATHS else OUTPUT_PATH, 'broadcast-pitch-images')
+        ExtractBroadcastPitchImages(broadcast_path,
+                                    BROADCAST_PITCH_FOLDER,
+                                    GAME_RECORD,
+                                    n_frames=40).run()
+
     # - GOAL DETECTION: restarts from the centre spot (version 0), compared with the score in the game logger
     if RUN_GOAL_DETECTION == True:
         GoalDetection(DATABASE_FILE,
@@ -291,7 +324,8 @@ def main():
                                 ANNOTATED_PATH=ANNOTATED_PATH,
                                 WORK_DIR=WORK_DIR,
                                 BACKGROUND_VIDEO=ANNOTATE_BACKGROUND_VIDEO,
-                                FIELD_OVERLAYS=ANNOTATE_FIELD_OVERLAYS)
+                                FIELD_OVERLAYS=ANNOTATE_FIELD_OVERLAYS,
+                                EDITED_PITCH_THIRDS=ANNOTATE_EDITED_PITCH)
         annotated_video.run()
 
 

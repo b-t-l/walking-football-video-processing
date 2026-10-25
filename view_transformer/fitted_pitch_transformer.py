@@ -419,6 +419,21 @@ class FittedPitchTransformer:
                 pts.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
         return self.world_to_pixel(pts)
 
+    def pitch_third_lines_pixels(self, per_line=160):
+        """Thirds grid as dense polylines in frame pixels (same lens curvature as the outline):
+          - two lines across the pitch (x = ±length/6): final / middle / defensive thirds
+          - two lines along the length (y = ±width/6): left / middle / right channels
+        """
+        L, W = self.length, self.width
+        lines = []
+        for x in (-L / 6.0, L / 6.0):
+            pts = [(x, -W / 2.0 + W * t) for t in np.linspace(0.0, 1.0, per_line)]
+            lines.append(self.world_to_pixel(pts))
+        for y in (-W / 6.0, W / 6.0):
+            pts = [(-L / 2.0 + L * t, y) for t in np.linspace(0.0, 1.0, per_line)]
+            lines.append(self.world_to_pixel(pts))
+        return lines
+
     def foot_pixel(self, xmin, ymin, xmax, ymax):
         """Pixel (x, y) in the original frame where transform_foot() puts the feet (for drawing)."""
         if self.vertical_vp is None:
