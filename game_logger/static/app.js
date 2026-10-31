@@ -835,17 +835,32 @@ function renderCalibrations(g) {
 const hex = rgb => "#" + rgb.map(n => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0")).join("");
 const unhex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
+const squadLabel = s => ({ mens: "Men", womens: "Women", both: "Both" }[s] || s);
+const playerCountLabel = p => {
+  if (!p || !p.total) return '<span class="muted small">None yet</span>';
+  const bits = [];
+  if (p.mens) bits.push(`${p.mens} men`);
+  if (p.womens) bits.push(`${p.womens} women`);
+  if (p.both) bits.push(`${p.both} both`);
+  return esc(bits.join(", "));
+};
+
 async function teamsPage() {
+  if (!META) META = await api("GET", "/api/meta");
   const teams = await api("GET", "/api/teams");
   if (location.hash !== "#/teams") return;
   view.innerHTML = `<div class="row spread" style="margin-bottom:14px"><h1 style="margin:0">Teams</h1><button class="primary" id="t-new">+ New team</button></div>
-    <div class="card"><p class="muted small" style="margin-top:0">Kit colours are what the team classifier matches players against, so a team needs at least one colour before a game with that team is processed.</p>
-    <table><thead><tr><th>Team</th><th>Kit colours</th><th>Games</th><th></th></tr></thead><tbody>
+    <div class="card"><p class="muted small" style="margin-top:0">Kit colours are what the team classifier matches players against, so a team needs at least one colour before a game with that team is processed. Named players (men / women squad) are for later identity tracking — start with Polis Lions.</p>
+    <table><thead><tr><th>Team</th><th>Kit colours</th><th>Players</th><th>Games</th><th></th></tr></thead><tbody>
     ${teams.map(t => `<tr><td><b>${esc(t.name)}</b> ${t.is_active ? "" : '<span class="chip">Inactive</span>'}${t.notes ? `<div class="muted small">${esc(t.notes)}</div>` : ""}</td>
       <td>${t.kit_colours.length ? t.kit_colours.map(c => `<span class="swatch" style="background:rgb(${c.rgb.join(",")})" title="rgb ${c.rgb.join(", ")}"></span>`).join("") : '<span class="chip warn">No colours yet</span>'}</td>
-      <td>${t.games}</td><td style="text-align:right"><button class="link" data-edit="${t.team_id}">Edit</button></td></tr>`).join("")}</tbody></table></div>
-    <dialog id="dlg"></dialog>`;
+      <td>${playerCountLabel(t.players)}</td>
+      <td>${t.games}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="link" data-players="${t.team_id}">Players</button>
+        <button class="link" data-edit="${t.team_id}">Edit</button></td></tr>`).join("")}</tbody></table></div>
+    <dialog id="dlg"></dialog><dialog id="players-dlg" style="width:min(720px,96vw)"></dialog>`;
   const dlg = document.getElementById("dlg");
+  const playersDlg = document.getElementById("players-dlg");
   const colourRow = (c = { rgb: [128, 128, 128], tolerance: [10, 50, 50] }) => `<div class="row kc" style="margin-bottom:6px;flex-wrap:nowrap">
       <input type="color" class="kc-rgb" value="${hex(c.rgb)}"><span class="small muted">tolerance H S V</span>
       ${c.tolerance.map((n, i) => `<input class="kc-tol" type="number" min="0" style="width:72px" value="${n}">`).join("")}
@@ -879,8 +894,79 @@ async function teamsPage() {
       catch (e) { $("dlg-msg").innerHTML = notice("bad", "Not saved:", e.errors); }
     };
   };
+  const openPlayers = async team => {
+    const squads = (META && META.player_squads) || ["mens", "womens", "both"];
+    const render = async () => {
+      const players = await api("GET", `/api/teams/${team.team_id}/players`);
+      if (location.hash !== "#/teams") return;
+      const rows = players.length ? players.map(p => `<tr>
+          <td><b>${esc(p.name)}</b>${p.is_active ? "" : ' <span class="chip">Inactive</span>'}${p.notes ? `<div class="muted small">${esc(p.notes)}</div>` : ""}</td>
+          <td><span class="chip info">${esc(squadLabel(p.squad))}</span></td>
+          <td style="text-align:right;white-space:nowrap">
+            <button type="button" class="link" data-pedit="${p.player_id}">Edit</button>
+            <button type="button" class="link danger" data-pdel="${p.player_id}">Delete</button>
+          </td></tr>`).join("")
+        : `<tr><td colspan="3" class="muted">No players yet — add the men's and women's squad names below.</td></tr>`;
+      playersDlg.innerHTML = `<h2>Players — ${esc(team.name)}</h2>
+        <p class="muted small" style="margin-top:0">One club can have a men's and a women's squad (e.g. Polis Lions). Use <b>Both</b> only if the same person plays in both.</p>
+        <div id="p-msg"></div>
+        <table><thead><tr><th>Name</th><th>Squad</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <h2 style="margin-top:18px" id="p-form-title">Add player</h2>
+        <div class="grid">
+          <div class="c5"><label>Name</label><input id="p-name" placeholder="e.g. Andreas"></div>
+          <div class="c3"><label>Squad</label><select id="p-squad">${squads.map(s => `<option value="${s}">${esc(squadLabel(s))}</option>`).join("")}</select></div>
+          <div class="c4" style="display:flex;align-items:flex-end;gap:10px;padding-bottom:2px">
+            <label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)"><input type="checkbox" id="p-active" checked> Active</label>
+          </div>
+          <div class="c12"><label>Notes <span class="small muted">(optional)</span></label><input id="p-notes"></div>
+        </div>
+        <div class="row spread" style="margin-top:16px">
+          <button type="button" id="p-close">Close</button>
+          <div class="row"><button type="button" id="p-cancel-edit" hidden>Cancel edit</button>
+            <button class="primary" type="button" id="p-save">Add player</button></div>
+        </div>`;
+      let editingId = null;
+      const $ = id => playersDlg.querySelector("#" + id);
+      const setForm = p => {
+        editingId = p ? p.player_id : null;
+        $("p-form-title").textContent = p ? "Edit player" : "Add player";
+        $("p-save").textContent = p ? "Save player" : "Add player";
+        $("p-cancel-edit").hidden = !p;
+        $("p-name").value = p ? p.name : "";
+        $("p-squad").value = p ? p.squad : "mens";
+        $("p-active").checked = p ? !!p.is_active : true;
+        $("p-notes").value = p ? (p.notes || "") : "";
+        if (!p) $("p-msg").innerHTML = "";
+      };
+      $("p-close").onclick = () => { playersDlg.close(); teamsPage(); };
+      $("p-cancel-edit").onclick = () => setForm(null);
+      $("p-save").onclick = async () => {
+        const body = { name: $("p-name").value, squad: $("p-squad").value, is_active: $("p-active").checked, notes: $("p-notes").value };
+        try {
+          if (editingId) await api("PUT", `/api/teams/${team.team_id}/players/${editingId}`, body);
+          else await api("POST", `/api/teams/${team.team_id}/players`, body);
+          toast(editingId ? "Player saved" : "Player added");
+          await render();
+        } catch (e) { $("p-msg").innerHTML = notice("bad", "Not saved:", e.errors); }
+      };
+      playersDlg.querySelectorAll("[data-pedit]").forEach(b => {
+        b.onclick = () => setForm(players.find(p => p.player_id === +b.dataset.pedit));
+      });
+      playersDlg.querySelectorAll("[data-pdel]").forEach(b => {
+        b.onclick = async () => {
+          const p = players.find(x => x.player_id === +b.dataset.pdel);
+          if (!p || !confirm(`Delete player "${p.name}" from ${team.name}?`)) return;
+          try { await api("DELETE", `/api/teams/${team.team_id}/players/${p.player_id}`); toast("Player deleted"); await render(); }
+          catch (e) { $("p-msg").innerHTML = notice("bad", "Not deleted:", e.errors); }
+        };
+      });
+    };
+    await render();
+    playersDlg.showModal();
+  };
   document.getElementById("t-new").onclick = () => edit(null);
   view.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => edit(teams.find(t => t.team_id === +b.dataset.edit)));
+  view.querySelectorAll("[data-players]").forEach(b => b.onclick = () => openPlayers(teams.find(t => t.team_id === +b.dataset.players)));
 }
 
 // ---------------------------------------------------------------------------------------------- settings

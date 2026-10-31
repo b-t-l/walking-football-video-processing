@@ -6,7 +6,7 @@ import datetime
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 SCHEMA_V1 = """
 CREATE TABLE settings (
@@ -77,6 +77,20 @@ CREATE INDEX idx_exclusions_game ON game_exclusions(game_id);
 # Each step takes the database from version N to N+1.
 MIGRATIONS = {
     1: ["ALTER TABLE games ADD COLUMN edited_video TEXT"],      # v2: the edited, TV-style video
+    2: [                                                        # v3: named players on each team (for identity assign later)
+        """CREATE TABLE players (
+            player_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id     INTEGER NOT NULL REFERENCES teams(team_id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            is_active   INTEGER NOT NULL DEFAULT 1,
+            notes       TEXT,
+            UNIQUE (team_id, name COLLATE NOCASE)
+        )""",
+        "CREATE INDEX idx_players_team ON players(team_id)",
+    ],
+    3: [                                                        # v4: mens / womens / both squad on each player (Polis has both)
+        "ALTER TABLE players ADD COLUMN squad TEXT NOT NULL DEFAULT 'mens'",
+    ],
 }
 
 

@@ -59,6 +59,7 @@ def _need_game(conn, game_id, detail=True):
 def meta(conn=Depends(get_conn)):
     return {"version": __version__, "db_path": config.DB_PATH, "backup_dir": config.BACKUP_DIR,
             "game_types": config.GAME_TYPES, "game_formats": config.GAME_FORMATS,
+            "player_squads": config.PLAYER_SQUADS,
             "running_speed_km_h": repo.default_running_speed(conn), "next_game_id": repo.next_game_id(conn),
             "calibrator_url": repo.get_setting(conn, "calibrator_url", config.CALIBRATOR_URL),
             "data_root": paths.root_info(), "data_root_from_env": bool((os.environ.get(paths.ENV_ROOT) or "").strip()),
@@ -222,6 +223,29 @@ def remove_team(team_id: int, clear_from_games: bool = False, conn=Depends(get_c
         db.backup("before-team-delete")
     repo.delete_team(conn, team_id, clear_from_games)
     return {"deleted": team_id}
+
+
+# ------------------------------------------------------------------------------------------ players
+
+@app.get("/api/teams/{team_id}/players")
+def team_players(team_id: int, conn=Depends(get_conn)):
+    return repo.list_players(conn, team_id)
+
+
+@app.post("/api/teams/{team_id}/players")
+def create_player(team_id: int, body: dict, conn=Depends(get_conn)):
+    return repo.save_player(conn, team_id, body)
+
+
+@app.put("/api/teams/{team_id}/players/{player_id}")
+def update_player(team_id: int, player_id: int, body: dict, conn=Depends(get_conn)):
+    return repo.save_player(conn, team_id, body, player_id)
+
+
+@app.delete("/api/teams/{team_id}/players/{player_id}")
+def remove_player(team_id: int, player_id: int, conn=Depends(get_conn)):
+    repo.delete_player(conn, team_id, player_id)
+    return {"deleted": player_id}
 
 
 # ------------------------------------------------------------------------------------------ export

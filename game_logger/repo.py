@@ -51,8 +51,17 @@ def list_teams(conn, include_inactive=True):
     counts = {r["tid"]: r["n"] for r in conn.execute(
         "SELECT tid, COUNT(*) n FROM (SELECT team_a_id tid FROM games UNION ALL SELECT team_b_id FROM games) "
         "WHERE tid IS NOT NULL GROUP BY tid")}
+    player_counts = {}
+    for r in conn.execute(
+        "SELECT team_id, squad, COUNT(*) n FROM players WHERE is_active = 1 GROUP BY team_id, squad"
+    ):
+        player_counts.setdefault(r["team_id"], {"mens": 0, "womens": 0, "both": 0, "total": 0})
+        sq = r["squad"] if r["squad"] in ("mens", "womens", "both") else "mens"
+        player_counts[r["team_id"]][sq] = r["n"]
+        player_counts[r["team_id"]]["total"] += r["n"]
     for t in teams:
         t["games"] = counts.get(t["team_id"], 0)
+        t["players"] = player_counts.get(t["team_id"], {"mens": 0, "womens": 0, "both": 0, "total": 0})
     return teams
 
 
@@ -118,6 +127,71 @@ def delete_team(conn, team_id, clear_from_games=False):
         conn.execute("UPDATE games SET team_a_id = NULL WHERE team_a_id = ?", (team_id,))
         conn.execute("UPDATE games SET team_b_id = NULL WHERE team_b_id = ?", (team_id,))
     conn.execute("DELETE FROM teams WHERE team_id = ?", (team_id,))
+    conn.commit()
+
+
+# --------------------------------------------------------------------------------------------- players
+
+def _player_dict(row):
+    d = dict(row)
+    d["is_active"] = bool(d["is_active"])
+    d["squad"] = d.get("squad") or "mens"
+    return d
+
+
+def list_players(conn, team_id, include_inactive=True):
+    if not get_team(conn, team_id):
+        raise ValidationError("That team does not exist")
+    sql = "SELECT * FROM players WHERE team_id = ?" + ("" if include_inactive else " AND is_active = 1")
+    sql += " ORDER BY CASE squad WHEN 'mens' THEN 0 WHEN 'womens' THEN 1 ELSE 2 END, name COLLATE NOCASE"
+    return [_player_dict(r) for r in conn.execute(sql, (team_id,))]
+
+
+def get_player(conn, player_id):
+    row = conn.execute("SELECT * FROM players WHERE player_id = ?", (player_id,)).fetchone()
+    return _player_dict(row) if row else None
+
+
+def save_player(conn, team_id, data, player_id=None):
+    if not get_team(conn, team_id):
+        raise ValidationError("That team does not exist")
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise ValidationError("A player needs a name")
+    squad = (data.get("squad") or "mens").strip().lower()
+    if squad not in config.PLAYER_SQUADS:
+        raise ValidationError(f"Squad must be one of: {', '.join(config.PLAYER_SQUADS)}")
+    active = 1 if data.get("is_active", True) else 0
+    notes = data.get("notes")
+    clash = conn.execute(
+        "SELECT player_id FROM players WHERE team_id = ? AND name = ? COLLATE NOCASE",
+        (team_id, name),
+    ).fetchone()
+    if clash and clash["player_id"] != player_id:
+        raise ValidationError(f"This team already has a player called '{name}'")
+    if player_id is None:
+        cur = conn.execute(
+            "INSERT INTO players(team_id, name, squad, is_active, notes) VALUES (?,?,?,?,?)",
+            (team_id, name, squad, active, notes),
+        )
+        player_id = cur.lastrowid
+    else:
+        existing = get_player(conn, player_id)
+        if not existing or existing["team_id"] != team_id:
+            raise ValidationError("That player does not exist on this team")
+        conn.execute(
+            "UPDATE players SET name=?, squad=?, is_active=?, notes=? WHERE player_id=? AND team_id=?",
+            (name, squad, active, notes, player_id, team_id),
+        )
+    conn.commit()
+    return get_player(conn, player_id)
+
+
+def delete_player(conn, team_id, player_id):
+    existing = get_player(conn, player_id)
+    if not existing or existing["team_id"] != team_id:
+        raise ValidationError("That player does not exist on this team")
+    conn.execute("DELETE FROM players WHERE player_id = ? AND team_id = ?", (player_id, team_id))
     conn.commit()
 
 

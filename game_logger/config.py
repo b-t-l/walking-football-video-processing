@@ -15,6 +15,8 @@ PORT = int(os.environ.get("GAME_LOGGER_PORT", "8765"))
 DEFAULT_RUNNING_SPEED_KM_H = 15
 GAME_TYPES = ["league", "cup", "friendly", "training", "n/a"]
 GAME_FORMATS = ["mens", "womens", "mixed", "n/a"]
+# Which squad a named player belongs to on a club that fields more than one (e.g. Polis Lions).
+PLAYER_SQUADS = ["mens", "womens", "both"]
 PITCH_POINT_NAMES = ["left_bottom", "left_top", "right_top", "right_bottom", "centre_top", "centre_bottom"]
 
 # The published Pitch Calibrator (a Claude artifact). Change it on the Settings page if it ever moves.
