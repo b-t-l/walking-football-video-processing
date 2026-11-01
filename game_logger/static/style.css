@@ -1,7 +1,7 @@
 :root {
-  --bg: #f5f6f8; --card: #ffffff; --text: #1d2330; --muted: #667085; --line: #e1e4ea;
-  --brand: #1f6f43; --brand-ink: #ffffff; --brand-soft: #e4f3ea;
-  --warn: #9a5b00; --warn-soft: #fff1d6; --bad: #b42318; --bad-soft: #fde7e5; --ok: #1f6f43; --info-soft: #e8eefb; --info: #2a4a9a;
+  --bg: #FCFBF9; --card: #ffffff; --text: #1d2330; --muted: #667085; --line: #e1e4ea;
+  --brand: #068C37; --brand-ink: #ffffff; --brand-soft: #e4f3ea;
+  --warn: #9a5b00; --warn-soft: #fff1d6; --bad: #b42318; --bad-soft: #fde7e5; --ok: #068C37; --info-soft: #e8eefb; --info: #2a4a9a;
   --radius: 8px;
 }
 @media (prefers-color-scheme: dark) {
