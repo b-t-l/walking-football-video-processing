@@ -74,7 +74,7 @@ def cover(fr, ctx):
     A, rec = ctx.A, ctx.rec
     fig = fr.new("", cover=True)
     fig.add_artist(patches.Rectangle((0, 0), 1, 0.30, transform=fig.transFigure, fc=S.BRAND, ec="none", zorder=0))
-    lax = fig.add_axes([0.06, 0.40, 0.17, 0.5]); lax.imshow(S.logo("green")); lax.axis("off")
+    lax = fig.add_axes([0.06, 0.40, 0.17, 0.5], facecolor="none", frameon=False); S.show_logo(lax, "green")
     fig.text(0.30, 0.82, "DETECTION REPORT", fontsize=13, color=S.BRAND, fontweight="bold")
     title = str(rec.get("title") or " vs ".join(A["teams"]))
     fig.text(0.30, 0.74, title, fontsize=min(34, 34 * 30 / max(len(title), 30)), fontweight="bold", color=S.INK, va="center")

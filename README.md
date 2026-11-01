@@ -42,7 +42,8 @@ Each game gets its own folder, found by its 4-digit game number:
     team-images/  <timestamp>/<team>/  pictures of players to correct and retrain the team model (made on demand)
     notes.txt
 <Data folder>/_app-data/   backups
-<Data folder>/_library/    <Data folder>/_inbox/
+<Data folder>/_library/    player_images/<player name>.png (+ default.png for missing portraits)
+<Data folder>/_inbox/
 ```
 
 The folder is **created automatically** when you save a new game. Copy the game's videos into its `videos/` folder with the names above and the app finds them by itself (or type/browse to a different file on the game page).

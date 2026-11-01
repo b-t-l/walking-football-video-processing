@@ -15,7 +15,8 @@
 .gl-spacer { flex: 1; }
 .gl-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 .gl-btn { font: inherit; font-size: 14px; border: 1px solid rgba(255, 255, 255, .28); background: transparent; color: #f3f1e8; border-radius: 6px;
-  padding: 6px 13px; cursor: pointer; text-decoration: none; display: inline-block; white-space: nowrap; }
+  padding: 6px 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.gl-btn-icon { width: 14px; height: 14px; flex: none; display: block; }
 .gl-btn:hover { border-color: #feca02; color: #fff; }
 .gl-btn:focus-visible, .gl-input:focus-visible, .gl-brand:focus-visible { outline: 2px solid #feca02; outline-offset: 2px; }
 .gl-btn.primary { background: #feca02; border-color: #feca02; color: #14201a; font-weight: 700; }

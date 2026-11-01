@@ -73,10 +73,90 @@ def heat_cmap(hexcol):
 _logos = {}
 
 
+def _branding_dir():
+    try:
+        from game_logger import paths
+        root = paths.configured_root()
+    except Exception:
+        root = None
+    if not root:
+        root = (os.environ.get("WALKING_FOOTBALL_ROOT") or "").strip()
+    if not root:
+        return None
+    return os.path.join(os.path.expanduser(root), "_library", "branding")
+
+
+def _library_green_svg():
+    """Green Polis SVG from <data>/_library/branding/, or a copy under report assets."""
+    preferred = "Green Polis WF Contained Logo.svg"
+    candidates = []
+    folder = _branding_dir()
+    if folder and os.path.isdir(folder):
+        candidates.append(os.path.join(folder, preferred))
+        try:
+            for name in sorted(os.listdir(folder)):
+                low = name.lower()
+                if low.endswith(".svg") and "polis" in low and "green" in low:
+                    candidates.append(os.path.join(folder, name))
+        except OSError:
+            pass
+    candidates.append(os.path.join(ASSETS, "polis-green.svg"))
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def _rasterize_svg_to_png(svg_path, px=1600):
+    """Rasterize SVG → transparent PNG via CairoSVG (keeps alpha; no white plate)."""
+    import hashlib
+
+    try:
+        mtime = os.path.getmtime(svg_path)
+    except OSError:
+        return None
+    key = hashlib.sha1(f"cairo|{os.path.abspath(svg_path)}|{mtime}|{px}".encode()).hexdigest()[:16]
+    cache_dir = os.path.join(ASSETS, ".logo-cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    out = os.path.join(cache_dir, f"polis-green-{key}.png")
+    if os.path.isfile(out):
+        return out
+    try:
+        import cairosvg
+        with open(svg_path, "rb") as f:
+            data = f.read()
+        cairosvg.svg2png(bytestring=data, write_to=out, output_width=int(px))
+        return out if os.path.isfile(out) else None
+    except Exception:
+        if os.path.isfile(out):
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+        return None
+
+
 def logo(name="green"):
+    """Report logo. Green prefers the sharp SVG in `_library/branding/`; else bundled PNG."""
     if name not in _logos:
-        _logos[name] = plt.imread(os.path.join(ASSETS, f"logo-{name}.png"))
+        path = None
+        if name == "green":
+            svg = _library_green_svg()
+            if svg:
+                path = _rasterize_svg_to_png(svg)
+        if not path:
+            path = os.path.join(ASSETS, f"logo-{name}.png")
+        _logos[name] = plt.imread(path)
     return _logos[name]
+
+
+def show_logo(ax, name="green"):
+    """Draw the logo on an axes with transparency preserved (no soft white plate)."""
+    ax.set_facecolor("none")
+    ax.patch.set_visible(False)
+    # High-res raster already; avoid a second soft filter that made the mark look blurry
+    ax.imshow(logo(name), interpolation="none")
+    ax.axis("off")
 
 
 class Frame:
@@ -86,15 +166,20 @@ class Frame:
         self.title, self.line, self.total, self.n = title, subtitle_line, total_pages, 0
 
     def new(self, heading, intro=None, cover=False):
+        import textwrap
+
         self.n += 1
         fig = plt.figure(figsize=(PAGE_W, PAGE_H), facecolor=BG)
         if not cover:
             # header
-            fig.text(0.05, 0.935, heading, fontsize=21, fontweight="bold", color=INK, va="center")
+            if heading:
+                fig.text(0.05, 0.935, heading, fontsize=21, fontweight="bold", color=INK, va="center")
             if intro:
-                fig.text(0.05, 0.893, intro, fontsize=10.5, color=MUTED, va="center")
-            lax = fig.add_axes([0.915, 0.905, 0.04, 0.075]); lax.imshow(logo("green")); lax.axis("off")
-            fig.add_artist(plt.Line2D([0.05, 0.95], [0.868, 0.868], color=FAINT, lw=1))
+                # wrap just before the header logo (~0.05–0.90 of the page)
+                wrapped = textwrap.fill(str(intro), width=145)
+                fig.text(0.05, 0.900, wrapped, fontsize=10.5, color=MUTED, va="top", linespacing=1.3)
+            lax = fig.add_axes([0.915, 0.905, 0.04, 0.075], facecolor="none", frameon=False)
+            show_logo(lax, "green")
             # footer
             fig.add_artist(plt.Line2D([0.05, 0.95], [0.052, 0.052], color=FAINT, lw=0.8))
             fig.text(0.05, 0.03, self.line, fontsize=8, color=MUTED, va="center")

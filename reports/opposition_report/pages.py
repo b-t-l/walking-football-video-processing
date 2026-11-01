@@ -86,7 +86,7 @@ def cover(fr, ctx, tm):
     col = ctx.colour[tm]
     fig = fr.new("", cover=True)
     fig.add_artist(patches.Rectangle((0, 0), 1, 0.30, transform=fig.transFigure, fc=S.BRAND, ec="none", zorder=0))
-    lax = fig.add_axes([0.06, 0.40, 0.17, 0.5]); lax.imshow(S.logo("green")); lax.axis("off")
+    lax = fig.add_axes([0.06, 0.40, 0.17, 0.5], facecolor="none", frameon=False); S.show_logo(lax, "green")
     fig.text(0.30, 0.82, "OPPOSITION REPORT", fontsize=13, color=S.BRAND, fontweight="bold")
     fig.add_artist(_dotp(fig, 0.312, 0.735, 0.0125, col))
     fig.text(0.335, 0.735, tm, fontsize=34, fontweight="bold", color=S.INK, va="center")

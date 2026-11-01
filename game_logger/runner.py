@@ -21,6 +21,7 @@ STEPS = [
     ("detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"),
     ("match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"),
     ("opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"),
+    ("player_report", "Player report", "PDF: distance, max speed and pitch dots coloured by possession — pick one named player or a whole team"),
     ("annotation", "Annotated video", "the video with detections drawn on it"),
     ("team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"),
     ("goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"),
@@ -29,7 +30,7 @@ STEPS = [
     ("broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"),
 ]
 STEP_IDS = [s[0] for s in STEPS]
-NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
+NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "player_report", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
 NEEDS_READY = {"detections", "transformations", "annotation"}
 NEEDS_EDITED_VIDEO = {"broadcast_pitch_images"}
 
@@ -132,7 +133,8 @@ def status():
         return dict(meta) if meta else None
 
 
-def start(conn, game_id, steps, duration_s=None, annotate_background=None, annotate_edited_pitch=None):
+def start(conn, game_id, steps, duration_s=None, annotate_background=None, annotate_edited_pitch=None,
+          player_report_target=None):
     steps = [s for s in STEP_IDS if s in set(steps or [])]       # keep the pipeline's own order
     if not steps:
         raise repo.ValidationError("Tick at least one stage to run")
@@ -160,6 +162,12 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
             raise repo.ValidationError("This game has no edited video, so Annotated video cannot use Edited as the background. Choose Analysis, or add the edited video on the game page.")
     else:
         edited_pitch = False                                     # pitch-keypoint thirds only apply to edited background
+
+    pr_target = (player_report_target or "named").strip() if player_report_target else "named"
+    if "player_report" not in steps:
+        pr_target = None
+    elif not pr_target:
+        raise repo.ValidationError("Choose who the Player report should cover (a named player or a whole team).")
 
     if NEEDS_EDITED_VIDEO & set(steps):
         g_edit = repo.get_game(conn, game_id)
@@ -192,6 +200,8 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
                 notes.append("Annotated video background: Edited, with pitch thirds from the pitch-keypoint model (slower).")
             else:
                 notes.append("Annotated video background: Edited (header, dashboard and overhead map; pitch thirds off).")
+        if "player_report" in steps:
+            notes.append(f"Player report target: {pr_target}")
 
         folder = log_folder(game_id)
         os.makedirs(folder, exist_ok=True)
@@ -206,6 +216,8 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
             cmd += ["--annotate-background", bg]
             if edited_pitch:
                 cmd += ["--annotate-edited-pitch"]
+        if "player_report" in steps and pr_target:
+            cmd += ["--player-report", pr_target]
         shown_cmd = " ".join(cmd)
         if sys.platform == "darwin" and shutil.which("caffeinate"):
             cmd = ["caffeinate", "-i"] + cmd                  # the Mac stays awake while the run is going
@@ -214,6 +226,7 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
             header = (f"=== Game logger run: game {game_id} ({g['title']})  {_now()}\n"
                       f"=== Stages: {', '.join(steps)}" + (f"   TEST RUN: first {duration_s} seconds only (results are kept in separate test files)" if duration_s else "") + "\n"
                       + (f"=== Annotated background: {bg}" + (f"  pitch thirds: {'ON' if edited_pitch else 'OFF'}" if bg == "edited" else "") + "\n" if "annotation" in steps else "")
+                      + (f"=== Player report: {pr_target}\n" if "player_report" in steps else "")
                       + f"=== {shown_cmd}\n" + "".join(f"=== Note: {n}\n" for n in notes) + "\n")
             lf.write(header.encode("utf-8"))
         logf = open(log_file, "ab")
@@ -227,6 +240,7 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
         meta = {"id": base, "game_id": game_id, "title": g["title"], "steps": steps, "duration_s": duration_s, "test": bool(duration_s),
                 "annotate_background": bg if "annotation" in steps else None,
                 "annotate_edited_pitch": bool(edited_pitch) if "annotation" in steps and bg == "edited" else False,
+                "player_report_target": pr_target if "player_report" in steps else None,
                 "started": _now(), "ended": None, "exit_code": None, "status": "running", "pid": proc.pid,
                 "log_file": log_file, "meta_file": meta_file, "notes": notes, "stop_requested": False}
         _run["meta"], _run["proc"] = meta, proc

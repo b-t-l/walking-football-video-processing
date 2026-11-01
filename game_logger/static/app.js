@@ -57,6 +57,7 @@ async function route() {
     if (!META) META = await api("GET", "/api/meta");
     if (hash === "#/" || hash === "") await gamesPage();
     else if (hash === "#/game/new") await gamePage(null);
+    else if (/^#\/game\/\d+\/identity$/.test(hash)) await identityPage(parseInt(hash.split("/")[2], 10));
     else if (hash.startsWith("#/game/")) await gamePage(parseInt(hash.slice(7), 10));
     else if (hash === "#/teams") await teamsPage();
     else if (hash === "#/settings") await settingsPage();
@@ -72,7 +73,16 @@ function setNav(hash) {
   document.getElementById("nav-links").hidden = isGame;
   document.getElementById("nav-context").hidden = !isGame;
   document.getElementById("nav-actions").innerHTML = "";
-  if (isGame) document.getElementById("nav-title").textContent = hash === "#/game/new" ? "New game" : "Game " + hash.slice(7);
+  if (isGame) {
+    const navBack = document.getElementById("nav-back");
+    if (navBack && !/\/identity$/.test(hash)) {
+      navBack.href = "#/";
+      navBack.innerHTML = "&larr; All games";
+    }
+    if (hash === "#/game/new") document.getElementById("nav-title").textContent = "New game";
+    else if (/\/identity$/.test(hash)) document.getElementById("nav-title").textContent = "Track Players · Game " + hash.split("/")[2];
+    else document.getElementById("nav-title").textContent = "Game " + hash.slice(7);
+  }
   document.querySelectorAll("#nav-links a").forEach(a => {
     const n = a.dataset.nav;
     a.classList.toggle("active", (n === "games" && hash === "#/") || (n !== "games" && hash.startsWith("#/" + n)));
@@ -220,6 +230,7 @@ async function gamePage(id) {
   const savedSteps = (() => { try { return JSON.parse(localStorage.getItem("gl-run-steps") || "null"); } catch (e) { return null; } })() || ["detections", "transformations", "annotation"];
   const savedAnnotateBg = (() => { try { return localStorage.getItem("gl-annotate-bg") || "analysis"; } catch (e) { return "analysis"; } })();
   const savedEditedPitch = (() => { try { return localStorage.getItem("gl-annotate-edited-pitch") === "1"; } catch (e) { return false; } })();
+  const savedPlayerReport = (() => { try { return localStorage.getItem("gl-player-report-target") || ""; } catch (e) { return ""; } })();
   const hasEditedVideo = !!(g.videos && g.videos.edited && g.videos.edited.exists);
   const annotateBg = (savedAnnotateBg === "edited" && hasEditedVideo) ? "edited" : "analysis";
   const runBody = isNew ? "" : `
@@ -235,6 +246,12 @@ async function gamePage(id) {
           <b>Pitch thirds on edited video</b>
           <span class="small muted">Runs the pitch-keypoint model on every frame (slower). Only applies when Background is Edited.</span>
         </label>
+      </div>
+      <div class="run-annotate-bg" id="run-player-report-row" style="opacity:0.55">
+        <label>Player report for <select id="run-player-report" style="width:auto;min-width:14em" disabled data-saved="${esc(savedPlayerReport)}">
+          <option value="">Loading…</option>
+        </select></label>
+        <span class="small muted">Used when Player report is ticked. Name players on Track Players for named options; whole-team always available.</span>
       </div>
       <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
         <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
@@ -294,7 +311,7 @@ async function gamePage(id) {
   const form = $("form");
   document.getElementById("nav-title").textContent = isNew ? "New game" : `Game ${g.game_id}: ${g.title}`;
   document.getElementById("nav-actions").innerHTML = `<span class="gl-note" id="dirty-note"></span>` +
-    (isNew ? "" : `<button type="button" class="gl-btn" id="dup">Duplicate</button><button type="button" class="gl-btn" id="arch">${g.archived ? "Unarchive" : "Archive"}</button><button type="button" class="gl-btn danger" id="del">Delete</button>`) +
+    (isNew ? "" : `<a class="gl-btn" href="#/game/${g.game_id}/identity"><svg class="gl-btn-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="4.2" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.2 13.2c.6-2.4 2.2-3.6 4.8-3.6s4.2 1.2 4.8 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12.2" cy="10.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="M12.2 8.4v3.6M10.4 10.2h3.6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>Track Players</a><button type="button" class="gl-btn" id="dup">Duplicate</button><button type="button" class="gl-btn" id="arch">${g.archived ? "Unarchive" : "Archive"}</button><button type="button" class="gl-btn danger" id="del">Delete</button>`) +
     `<button type="submit" form="form" class="gl-btn primary" id="save">Save</button>`;
 
   // collapsible sections: remember which are open
@@ -463,6 +480,7 @@ const RUN_STEPS = [
   ["detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"],
   ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
   ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
+  ["player_report", "Player report", "PDF: distance, max speed and pitch dots coloured by possession — pick one named player or a whole team"],
   ["annotation", "Annotated video", "the video with detections drawn on it"],
   ["team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"],
   ["goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"],
@@ -538,17 +556,41 @@ function setupRunPanel(g) {
     if (pitch) pitch.disabled = !pitchOn;
     if (pitchRow) pitchRow.style.opacity = pitchOn ? "" : "0.55";
   };
-  document.querySelectorAll("[data-step]").forEach(el => el.addEventListener("change", syncAnnotateBg));
+  const syncPlayerReport = () => {
+    const sel = $("run-player-report"), row = $("run-player-report-row");
+    if (!sel) return;
+    const on = !!document.querySelector('[data-step="player_report"]:checked');
+    sel.disabled = !on;
+    if (row) row.style.opacity = on ? "" : "0.55";
+  };
+  document.querySelectorAll("[data-step]").forEach(el => el.addEventListener("change", () => { syncAnnotateBg(); syncPlayerReport(); }));
   const _bgSel = $("run-annotate-bg");
   if (_bgSel) _bgSel.addEventListener("change", syncAnnotateBg);
   syncAnnotateBg();
+  syncPlayerReport();
+  (async () => {
+    const sel = $("run-player-report");
+    if (!sel) return;
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/player-report/targets`);
+      const saved = sel.dataset.saved || "";
+      const opts = (r.targets || []).map(t =>
+        `<option value="${esc(t.id)}" ${t.id === saved ? "selected" : ""}>${esc(t.label)}</option>`).join("");
+      sel.innerHTML = opts || `<option value="named">All named players</option>`;
+      if (saved && ![...sel.options].some(o => o.value === saved) && sel.options.length) sel.selectedIndex = 0;
+    } catch (e) {
+      sel.innerHTML = `<option value="team:${esc(g.team_a || "")}">Whole team · ${esc(g.team_a || "A")}</option>`
+        + (g.team_b ? `<option value="team:${esc(g.team_b)}">Whole team · ${esc(g.team_b)}</option>` : "");
+    }
+    syncPlayerReport();
+  })();
 
   const showStatus = (r, pct) => {
     const mine = r && r.game_id === g.game_id, running = r && r.status === "running";
     $("run-go").disabled = !!running;
     $("run-stop").disabled = !(running && mine);
-    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg, #run-edited-pitch").forEach(el => { el.disabled = !!running; });
-    if (!running) syncAnnotateBg();
+    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg, #run-edited-pitch, #run-player-report").forEach(el => { el.disabled = !!running; });
+    if (!running) { syncAnnotateBg(); syncPlayerReport(); }
     let txt = "", sum = "detections, reports and the annotated video";
     if (r) {
       const who = mine ? "" : `game ${r.game_id}: `;
@@ -609,6 +651,11 @@ function setupRunPanel(g) {
       body.annotate_edited_pitch = pitch;
       try { localStorage.setItem("gl-annotate-bg", bg); } catch (e) { /* ignore */ }
       try { localStorage.setItem("gl-annotate-edited-pitch", pitch ? "1" : "0"); } catch (e) { /* ignore */ }
+    }
+    if (steps.includes("player_report")) {
+      const tgt = ($("run-player-report") && $("run-player-report").value) || "named";
+      body.player_report_target = tgt;
+      try { localStorage.setItem("gl-player-report-target", tgt); } catch (e) { /* ignore */ }
     }
     try {
       const r = await api("POST", `/api/games/${g.game_id}/run`, body);
@@ -830,11 +877,6 @@ function renderCalibrations(g) {
   });
 }
 
-// ---------------------------------------------------------------------------------------------- teams
-
-const hex = rgb => "#" + rgb.map(n => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0")).join("");
-const unhex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
-
 const squadLabel = s => ({ mens: "Men", womens: "Women", both: "Both" }[s] || s);
 const playerCountLabel = p => {
   if (!p || !p.total) return '<span class="muted small">None yet</span>';
@@ -844,6 +886,576 @@ const playerCountLabel = p => {
   if (p.both) bits.push(`${p.both} both`);
   return esc(bits.join(", "));
 };
+
+// ---------------------------------------------------------------------------------------------- identity (name Polis players on the analysis video)
+
+async function identityPage(gameId) {
+  const data = await api("GET", `/api/games/${gameId}/identity`);
+  if (location.hash !== `#/game/${gameId}/identity`) return;
+
+  const navBack = document.getElementById("nav-back");
+  if (navBack) { navBack.href = `#/game/${gameId}`; navBack.textContent = "← Game " + gameId; }
+  document.getElementById("nav-title").textContent = `Track Players · ${data.title || ("Game " + gameId)}`;
+  document.getElementById("nav-actions").innerHTML = `<a class="gl-btn" href="#/game/${gameId}">Back to game</a>`;
+
+  const analysisOk = !!(data.videos && data.videos.analysis && data.videos.analysis.exists);
+  const startT = data.game_start_s != null ? data.game_start_s : 0;
+
+  view.innerHTML = `
+    <div id="id-msgs"></div>
+    ${!data.polis_team_ids.length ? notice("warn", "No Polis team on this game", ["Pick Polis Lions as team A or B on the game page, then come back."]) : ""}
+    ${!data.has_detections ? notice("warn", "Detections needed", [data.detections_error || "Run Detections first."]) : ""}
+    ${!analysisOk ? notice("bad", "No analysis video", ["Add the analysis video on the game page — boxes are in that camera."]) : ""}
+    <div class="id-layout">
+      <section class="id-stage card">
+        <div class="id-video-wrap" id="id-video-wrap">
+          <div class="id-zoom-stage" id="id-zoom-stage">
+            <video id="id-pv" controls preload="metadata" playsinline></video>
+            <canvas id="id-cv"></canvas>
+          </div>
+        </div>
+        <div class="row id-controls">
+          <span class="id-time" id="id-cur">00:00</span>
+          <button type="button" data-iskip="-5">−5s</button>
+          <button type="button" data-iskip="-0.0417" title="One frame">◀ frame</button>
+          <button type="button" id="id-pause">Pause</button>
+          <button type="button" data-iskip="0.0417" title="One frame">frame ▶</button>
+          <button type="button" data-iskip="5">+5s</button>
+          <label class="small" style="margin:0;display:flex;gap:6px;align-items:center">Speed
+            <select id="id-speed" style="width:auto">${[0.5, 1, 2, 4].map(s => `<option value="${s}" ${s === 1 ? "selected" : ""}>${s}×</option>`).join("")}</select>
+          </label>
+          <label class="small id-zoom-ctrl" title="Drag the video to pan when zoomed in. Ctrl/⌘ + scroll also zooms.">
+            Zoom
+            <input type="range" id="id-zoom" min="1" max="3" step="0.05" value="1">
+            <span id="id-zoom-val">100%</span>
+            <button type="button" class="link" id="id-zoom-reset" hidden>Reset</button>
+          </label>
+          <span class="small muted" id="id-frame-meta"></span>
+        </div>
+        <p class="muted small" style="margin:10px 0 0">Click a box to name that track (or right-click for a quick name list). When tracking breaks, click the new box and pick the same person again. Format: <b>${esc(data.game_format || "—")}</b> · roster shows ${esc(data.game_format === "womens" ? "women (+ both)" : data.game_format === "mens" ? "men (+ both)" : "all Polis players")}.</p>
+      </section>
+      <aside class="id-side">
+        <div class="card">
+          <h2 style="margin-top:0">Assign</h2>
+          <div id="id-pick" class="muted small">Click a detection box on the video.</div>
+          <div id="id-roster-wrap" hidden>
+            <p class="small" style="margin:10px 0 6px"><b id="id-pick-label"></b></p>
+            <input id="id-filter" placeholder="Filter names…" style="margin-bottom:8px">
+            <div id="id-roster" class="id-roster"></div>
+            <button type="button" class="link danger" id="id-clear" style="margin-top:8px" hidden>Clear name on this track</button>
+          </div>
+        </div>
+        <div class="card id-asg-card">
+          <div class="row spread id-asg-head" style="align-items:baseline;gap:8px">
+            <h2 style="margin:0">Named so far <span class="muted small" id="id-asg-count"></span></h2>
+            <span class="row" style="gap:6px;flex-wrap:nowrap">
+              <button type="button" id="id-prev-break" hidden>Prev break</button>
+              <button type="button" class="primary" id="id-next-break" hidden>Next break</button>
+            </span>
+          </div>
+          <p class="muted small" id="id-break-hint" hidden>Jump to where a named track is lost, then click the new box and assign the same person.</p>
+          <div id="id-assignments" class="id-asg-list muted small">None yet.</div>
+        </div>
+      </aside>
+    </div>
+    <div id="id-ctx" class="id-ctx" hidden></div>
+    <dialog id="id-dlg"></dialog>`;
+
+  if (!analysisOk || !data.has_detections) return;
+
+  const pv = document.getElementById("id-pv");
+  const cv = document.getElementById("id-cv");
+  const stage = document.getElementById("id-zoom-stage");
+  const wrapEl = document.getElementById("id-video-wrap");
+  const ctx = cv.getContext("2d");
+  let boxes = [];
+  let selectedTrack = null;
+  let assignments = data.assignments || [];
+  let roster = data.roster || [];
+  let breaks = [];
+  let fetchTimer = null;
+  let videoW = 0, videoH = 0;
+  let zoom = 1, panX = 0, panY = 0;
+
+  const breakForRoster = rid => breaks.find(b => b.roster_player_id === rid) || null;
+
+  const jumpToBreak = b => {
+    if (!b) return;
+    closeCtx();
+    pv.pause();
+    pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, b.seek_t));
+    selectedTrack = null;
+    toast(`${b.name}: track #${b.track_player_id} lost @ ${fmtT(b.lost_at_t)} — pick the new box`);
+  };
+
+  const refreshBreaks = async () => {
+    try {
+      const r = await api("GET", `/api/games/${gameId}/identity/breaks`);
+      breaks = r.breaks || [];
+    } catch (e) {
+      breaks = [];
+    }
+    const nextBtn = document.getElementById("id-next-break");
+    const prevBtn = document.getElementById("id-prev-break");
+    const hint = document.getElementById("id-break-hint");
+    const n = breaks.length;
+    if (nextBtn) {
+      nextBtn.hidden = !n;
+      nextBtn.textContent = n ? `Next break (${n})` : "Next break";
+    }
+    if (prevBtn) {
+      prevBtn.hidden = !n;
+      prevBtn.textContent = n ? `Prev break (${n})` : "Prev break";
+    }
+    if (hint) hint.hidden = !n;
+    renderAssignments();
+  };
+
+  const renderAssignments = () => {
+    document.getElementById("id-asg-count").textContent = assignments.length ? `(${assignments.length})` : "";
+    if (!assignments.length) {
+      document.getElementById("id-assignments").innerHTML = `<span class="muted">None yet.</span>`;
+      return;
+    }
+    // collapse by person: latest open segment first
+    const byPerson = {};
+    assignments.forEach(a => {
+      (byPerson[a.roster_player_id] || (byPerson[a.roster_player_id] = [])).push(a);
+    });
+    document.getElementById("id-assignments").innerHTML = Object.values(byPerson).map(segs => {
+      segs = segs.slice().sort((a, b) => a.from_frame - b.from_frame);
+      const name = segs[0].name;
+      const rid = segs[0].roster_player_id;
+      const br = breakForRoster(rid);
+      const bits = segs.map(s => `#${s.track_player_id} @f${s.from_frame}${s.to_frame == null ? "→" : "–" + s.to_frame}`).join(", ");
+      const breakBtns = br
+        ? `<span class="row" style="gap:8px;flex-wrap:nowrap">
+             <button type="button" class="link" data-break="${rid}" title="Jump to where track #${br.track_player_id} is lost">Break @ ${fmtT(br.lost_at_t)}</button>
+             <button type="button" class="link" data-skip-break="${rid}" title="Player not visible / not detected — skip this break">Skip</button>
+           </span>`
+        : `<span class="chip ok">OK</span>`;
+      return `<div class="id-asg-row"><div class="row spread" style="gap:6px;align-items:baseline"><b>${esc(name)}</b>${breakBtns}</div><div class="muted">${esc(bits)}</div></div>`;
+    }).join("");
+    document.querySelectorAll("#id-assignments [data-break]").forEach(btn => {
+      btn.onclick = () => jumpToBreak(breakForRoster(+btn.dataset.break));
+    });
+    document.querySelectorAll("#id-assignments [data-skip-break]").forEach(btn => {
+      btn.onclick = () => skipBreak(+btn.dataset.skipBreak);
+    });
+  };
+
+  const skipBreak = async (rosterPlayerId) => {
+    const br = breakForRoster(rosterPlayerId);
+    if (!br) { toast("No break to skip"); return; }
+    try {
+      const r = await api("POST", `/api/games/${gameId}/identity/skip-break`, { roster_player_id: rosterPlayerId });
+      toast(r.message || "Skipped");
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      // If other breaks remain, offer the next one
+      if (breaks.length) {
+        const next = breaks.find(b => b.seek_t >= (br.seek_t || 0)) || breaks[0];
+        jumpToBreak(next);
+      }
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  // Native <video controls> sit in the bottom strip — keep the canvas above them so Play works.
+  const CONTROLS_H = 56;
+
+  const clampPan = () => {
+    if (zoom <= 1.001) { panX = 0; panY = 0; return; }
+    const r = wrapEl.getBoundingClientRect();
+    const maxX = (r.width * (zoom - 1)) / 2 + 48;
+    const maxY = (r.height * (zoom - 1)) / 2 + 48;
+    panX = Math.max(-maxX, Math.min(maxX, panX));
+    panY = Math.max(-maxY, Math.min(maxY, panY));
+  };
+
+  const applyZoom = () => {
+    clampPan();
+    stage.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    const zoomInput = document.getElementById("id-zoom");
+    const zoomVal = document.getElementById("id-zoom-val");
+    const resetBtn = document.getElementById("id-zoom-reset");
+    if (zoomInput && Math.abs(parseFloat(zoomInput.value) - zoom) > 0.001) zoomInput.value = String(zoom);
+    if (zoomVal) zoomVal.textContent = `${Math.round(zoom * 100)}%`;
+    if (resetBtn) resetBtn.hidden = zoom <= 1.001 && Math.abs(panX) < 0.5 && Math.abs(panY) < 0.5;
+    cv.style.cursor = zoom > 1.001 ? "grab" : "crosshair";
+  };
+
+  const setZoom = (z, keepPan) => {
+    zoom = Math.max(1, Math.min(3, z));
+    if (!keepPan && zoom <= 1.001) { panX = 0; panY = 0; }
+    applyZoom();
+    draw();
+  };
+
+  const draw = () => {
+    // Layout sizes ignore CSS zoom on the stage (clientWidth); screen rects include it.
+    const layoutW = pv.clientWidth || stage.clientWidth;
+    const layoutH = pv.clientHeight || stage.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const coverH = Math.max(0, layoutH - CONTROLS_H);
+    cv.style.left = "0px";
+    cv.style.top = "0px";
+    cv.style.width = layoutW + "px";
+    cv.style.height = coverH + "px";
+    cv.width = Math.round(layoutW * dpr);
+    cv.height = Math.round(coverH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, layoutW, coverH);
+    if (!videoW || !videoH) return;
+    // object-fit: contain mapping inside the full video element box (including controls strip)
+    const scale = Math.min(layoutW / videoW, layoutH / videoH);
+    const dw = videoW * scale, dh = videoH * scale;
+    const ox = (layoutW - dw) / 2, oy = (layoutH - dh) / 2;
+    if (!boxes.length) return;
+    boxes.forEach(b => {
+      const x = ox + b.xmin * scale, y = oy + b.ymin * scale;
+      const w = (b.xmax - b.xmin) * scale, h = (b.ymax - b.ymin) * scale;
+      const named = !!b.name;
+      const sel = selectedTrack != null && b.track_player_id === selectedTrack;
+      ctx.lineWidth = sel ? 3 : 2;
+      ctx.strokeStyle = named ? "#3fa56c" : (b.is_polis ? "#feca02" : "rgba(255,255,255,.55)");
+      ctx.fillStyle = named ? "rgba(63,165,108,.18)" : (sel ? "rgba(254,202,2,.2)" : "rgba(0,0,0,.05)");
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x, y, w, h);
+      const label = b.name
+        ? `${b.name} #${b.track_player_id}`
+        : (b.is_polis ? `P #${b.track_player_id}` : `#${b.track_player_id}`);
+      ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+      const tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = named ? "rgba(31,111,67,.92)" : "rgba(0,0,0,.75)";
+      ctx.fillRect(x, Math.max(0, y - 18), tw, 18);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 4, Math.max(12, y - 5));
+      b._hit = { x, y, w, h };
+    });
+  };
+
+  const ensureSkipInPick = () => {
+    let skipPick = document.getElementById("id-skip-break");
+    if (!skipPick) {
+      const clearBtn = document.getElementById("id-clear");
+      if (!clearBtn || !clearBtn.parentElement) return;
+      clearBtn.insertAdjacentHTML("afterend",
+        `<button type="button" class="link" id="id-skip-break" style="margin-top:8px;margin-left:10px" hidden>Skip break</button>`);
+      skipPick = document.getElementById("id-skip-break");
+      skipPick.onclick = () => {
+        const br = breaks.find(b => b.track_player_id === selectedTrack)
+          || breaks.find(b => Math.abs(b.seek_t - (pv.currentTime || 0)) < 2.5);
+        if (!br) { toast("No break linked to this selection"); return; }
+        skipBreak(br.roster_player_id);
+      };
+    }
+    const near = breaks.find(b => b.track_player_id === selectedTrack)
+      || breaks.find(b => Math.abs(b.seek_t - (pv.currentTime || 0)) < 2.5);
+    skipPick.hidden = !near;
+  };
+
+  const hitBoxAt = (clientX, clientY) => {
+    const rect = cv.getBoundingClientRect();
+    // Map screen coords back through CSS zoom on the stage
+    const sx = cv.clientWidth / (rect.width || 1);
+    const sy = cv.clientHeight / (rect.height || 1);
+    const x = (clientX - rect.left) * sx;
+    const y = (clientY - rect.top) * sy;
+    let hit = null, area = Infinity;
+    boxes.forEach(b => {
+      const h = b._hit; if (!h) return;
+      if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) {
+        const a = h.w * h.h;
+        if (a < area) { area = a; hit = b; }
+      }
+    });
+    return hit;
+  };
+
+  const closeCtx = () => {
+    const menu = document.getElementById("id-ctx");
+    if (menu) menu.hidden = true;
+  };
+
+  const assignSelected = async (rosterPlayerId) => {
+    if (selectedTrack == null) return;
+    try {
+      const r = await api("POST", `/api/games/${gameId}/identity/assign`, {
+        roster_player_id: rosterPlayerId,
+        track_player_id: selectedTrack,
+        t: pv.currentTime,
+      });
+      toast(r.ended_overlapping
+        ? `Named (ended ${r.ended_overlapping} other link${r.ended_overlapping === 1 ? "" : "s"} so they aren’t in two places)`
+        : "Named");
+      closeCtx();
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      await refreshBoxes(true);
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  const clearSelected = async () => {
+    if (selectedTrack == null) return;
+    try {
+      await api("POST", `/api/games/${gameId}/identity/clear`, { track_player_id: selectedTrack, t: pv.currentTime });
+      toast("Cleared");
+      closeCtx();
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      await refreshBoxes(true);
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  const filteredRoster = (q) => {
+    const needle = (q || "").trim().toLowerCase();
+    return roster.filter(p => !needle || p.name.toLowerCase().includes(needle));
+  };
+
+  const renderRosterButtons = (container, box, q) => {
+    const list = filteredRoster(q);
+    container.innerHTML = list.length
+      ? list.map(p => `<button type="button" class="id-name ${box && box.roster_player_id === p.player_id ? "on" : ""}" data-rid="${p.player_id}">
+          ${esc(p.name)} <span class="muted">${esc(squadLabel(p.squad))}</span></button>`).join("")
+      : `<span class="muted">No names match. Add players on the Teams page.</span>`;
+    container.querySelectorAll("[data-rid]").forEach(btn => {
+      btn.onclick = () => assignSelected(+btn.dataset.rid);
+    });
+  };
+
+  const openCtx = (clientX, clientY) => {
+    const menu = document.getElementById("id-ctx");
+    if (!menu || selectedTrack == null) return;
+    const box = boxes.find(b => b.track_player_id === selectedTrack);
+    const titled = box && box.name
+      ? `Track #${selectedTrack} · ${box.name}`
+      : `Track #${selectedTrack}${box && box.team ? " · " + box.team : ""}`;
+    menu.hidden = false;
+    menu.innerHTML = `
+      <p class="id-ctx-head">${esc(titled)} — pick a name</p>
+      <input class="id-ctx-filter" id="id-ctx-filter" placeholder="Filter names…" autocomplete="off">
+      <div class="id-ctx-list" id="id-ctx-list"></div>
+      <div class="id-ctx-foot">
+        ${box && box.name ? `<button type="button" class="link danger" id="id-ctx-clear">Clear name</button>` : ""}
+        <button type="button" class="link" id="id-ctx-close">Close</button>
+      </div>`;
+    const listEl = document.getElementById("id-ctx-list");
+    const filterEl = document.getElementById("id-ctx-filter");
+    renderRosterButtons(listEl, box, "");
+    filterEl.oninput = () => renderRosterButtons(listEl, box, filterEl.value);
+    const clearBtn = document.getElementById("id-ctx-clear");
+    if (clearBtn) clearBtn.onclick = () => clearSelected();
+    document.getElementById("id-ctx-close").onclick = closeCtx;
+    // Position near cursor, clamped to the viewport
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    const pad = 8;
+    let left = clientX + 4, top = clientY + 4;
+    if (left + mw > window.innerWidth - pad) left = Math.max(pad, clientX - mw - 4);
+    if (top + mh > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - mh - pad);
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    filterEl.focus();
+  };
+
+  const showPick = () => {
+    const wrap = document.getElementById("id-roster-wrap");
+    const pick = document.getElementById("id-pick");
+    const clearBtn = document.getElementById("id-clear");
+    if (selectedTrack == null) {
+      wrap.hidden = true;
+      pick.textContent = "Click a detection box on the video (right-click for a quick name list).";
+      const skipPick = document.getElementById("id-skip-break");
+      if (skipPick) skipPick.hidden = true;
+      return;
+    }
+    const box = boxes.find(b => b.track_player_id === selectedTrack);
+    wrap.hidden = false;
+    pick.textContent = "";
+    document.getElementById("id-pick-label").textContent =
+      box && box.name ? `Track #${selectedTrack} is ${box.name} — re-assign or clear:` : `Track #${selectedTrack}${box && box.team ? " · " + box.team : ""} — pick a name:`;
+    clearBtn.hidden = !(box && box.name);
+    ensureSkipInPick();
+    renderRosterButtons(document.getElementById("id-roster"), box, document.getElementById("id-filter").value);
+  };
+
+  const refreshBoxes = async (force) => {
+    if (!force && !pv.paused && Math.abs(pv.currentTime - (refreshBoxes._last || 0)) < 0.08) return;
+    refreshBoxes._last = pv.currentTime;
+    try {
+      const r = await api("GET", `/api/games/${gameId}/identity/boxes?t=${encodeURIComponent(pv.currentTime)}`);
+      boxes = r.boxes || [];
+      const conflicts = r.identity_conflicts || [];
+      let meta = r.frame_id != null
+        ? `frame ${r.frame_id} · ${boxes.length} boxes · ${boxes.filter(b => b.name).length} named`
+        : "no detections near here";
+      if (conflicts.length) {
+        meta += ` · ${conflicts.length} duplicate name${conflicts.length === 1 ? "" : "s"} cleared on this frame`;
+      }
+      document.getElementById("id-frame-meta").textContent = meta;
+      draw();
+      showPick();
+    } catch (e) {
+      document.getElementById("id-frame-meta").textContent = (e.errors || [e.message]).join(" ");
+    }
+  };
+
+  const scheduleRefresh = () => {
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(() => refreshBoxes(true), pv.paused ? 40 : 120);
+  };
+
+  pv.src = `/api/games/${gameId}/video?key=analysis`;
+  pv.addEventListener("loadedmetadata", () => {
+    videoW = pv.videoWidth; videoH = pv.videoHeight;
+    if (startT > 0 && startT < (pv.duration || 1e9)) pv.currentTime = startT;
+    draw(); refreshBoxes(true);
+  });
+  pv.addEventListener("timeupdate", () => {
+    document.getElementById("id-cur").textContent = fmtT(pv.currentTime);
+    scheduleRefresh();
+  });
+  pv.addEventListener("seeked", () => refreshBoxes(true));
+  pv.addEventListener("play", () => { document.getElementById("id-pause").textContent = "Pause"; });
+  pv.addEventListener("pause", () => { document.getElementById("id-pause").textContent = "Play"; refreshBoxes(true); });
+  window.addEventListener("resize", () => { applyZoom(); draw(); });
+
+  document.getElementById("id-pause").onclick = () => { pv.paused ? pv.play() : pv.pause(); };
+  document.getElementById("id-speed").onchange = e => { pv.playbackRate = parseFloat(e.target.value); };
+  document.querySelectorAll("[data-iskip]").forEach(b => b.onclick = () => {
+    const d = parseFloat(b.dataset.iskip);
+    if (Math.abs(d) < 1) pv.pause();
+    pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, pv.currentTime + d));
+  });
+  document.getElementById("id-filter").oninput = showPick;
+  document.getElementById("id-clear").onclick = () => clearSelected();
+
+  const goNextBreak = () => {
+    if (!breaks.length) { toast("No track breaks right now"); return; }
+    closeCtx();
+    // Prefer the earliest break at/after the current time; otherwise wrap to the first.
+    const t = pv.currentTime || 0;
+    const next = breaks.find(b => b.seek_t >= t - 0.05) || breaks[0];
+    jumpToBreak(next);
+  };
+  const goPrevBreak = () => {
+    if (!breaks.length) { toast("No track breaks right now"); return; }
+    closeCtx();
+    // Prefer the latest break strictly before the current time; otherwise wrap to the last.
+    const t = pv.currentTime || 0;
+    let prev = null;
+    for (let i = breaks.length - 1; i >= 0; i--) {
+      if (breaks[i].seek_t < t - 0.05) { prev = breaks[i]; break; }
+    }
+    jumpToBreak(prev || breaks[breaks.length - 1]);
+  };
+  document.getElementById("id-next-break").onclick = goNextBreak;
+  document.getElementById("id-prev-break").onclick = goPrevBreak;
+
+  const selectHit = (hit) => {
+    selectedTrack = hit ? hit.track_player_id : null;
+    pv.pause();
+    draw();
+    showPick();
+  };
+
+  document.getElementById("id-zoom").oninput = e => setZoom(parseFloat(e.target.value) || 1, true);
+  document.getElementById("id-zoom-reset").onclick = () => { panX = 0; panY = 0; setZoom(1, false); };
+
+  // Drag to pan when zoomed (or always — small moves still count as click)
+  let panDrag = null;
+  cv.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    panDrag = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origPanX: panX,
+      origPanY: panY,
+      moved: false,
+      panning: false,
+    };
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!panDrag || e.pointerId !== panDrag.pointerId) return;
+    const dx = e.clientX - panDrag.startX;
+    const dy = e.clientY - panDrag.startY;
+    if (!panDrag.moved && (dx * dx + dy * dy) > 36) {
+      panDrag.moved = true;
+      if (zoom > 1.001) {
+        panDrag.panning = true;
+        closeCtx();
+        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        wrapEl.classList.add("is-panning");
+      }
+    }
+    if (panDrag.panning) {
+      panX = panDrag.origPanX + dx;
+      panY = panDrag.origPanY + dy;
+      applyZoom();
+    }
+  });
+  const endPanDrag = e => {
+    if (!panDrag || (e && e.pointerId !== panDrag.pointerId)) return;
+    const wasPan = panDrag.panning;
+    const sx = panDrag.startX, sy = panDrag.startY;
+    wrapEl.classList.remove("is-panning");
+    panDrag = null;
+    if (wasPan) return; // consumed as pan
+    closeCtx();
+    selectHit(hitBoxAt(sx, sy));
+  };
+  cv.addEventListener("pointerup", endPanDrag);
+  cv.addEventListener("pointercancel", endPanDrag);
+
+  cv.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    panDrag = null;
+    wrapEl.classList.remove("is-panning");
+    const hit = hitBoxAt(e.clientX, e.clientY);
+    if (!hit) { closeCtx(); selectHit(null); return; }
+    selectHit(hit);
+    openCtx(e.clientX, e.clientY);
+  });
+
+  wrapEl.addEventListener("wheel", e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const next = zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08);
+    setZoom(next, true);
+  }, { passive: false });
+
+  document.addEventListener("pointerdown", e => {
+    const menu = document.getElementById("id-ctx");
+    if (!menu || menu.hidden) return;
+    if (!menu.contains(e.target)) closeCtx();
+  }, true);
+
+  applyZoom();
+
+  if (keyHandler) document.removeEventListener("keydown", keyHandler);
+  keyHandler = e => {
+    if (location.hash !== `#/game/${gameId}/identity`) return;
+    if (e.key === "Escape") { closeCtx(); return; }
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === " ") { e.preventDefault(); pv.paused ? pv.play() : pv.pause(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); pv.currentTime -= e.shiftKey ? 30 : 5; }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pv.currentTime += e.shiftKey ? 30 : 5; }
+    else if (e.key === ",") { pv.pause(); pv.currentTime -= 0.0417; }
+    else if (e.key === ".") { pv.pause(); pv.currentTime += 0.0417; }
+  };
+  document.addEventListener("keydown", keyHandler);
+
+  refreshBreaks();
+  showPick();
+}
+
+// ---------------------------------------------------------------------------------------------- teams
+
+const hex = rgb => "#" + rgb.map(n => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0")).join("");
+const unhex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
 async function teamsPage() {
   if (!META) META = await api("GET", "/api/meta");

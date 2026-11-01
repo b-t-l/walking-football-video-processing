@@ -26,7 +26,7 @@ def _only_from_the_app(request: Request):
 def _public(meta):
     if not meta:
         return None
-    out = {k: meta.get(k) for k in ("id", "game_id", "title", "steps", "duration_s", "test", "annotate_background", "annotate_edited_pitch", "started", "ended", "exit_code", "status", "notes", "note")}
+    out = {k: meta.get(k) for k in ("id", "game_id", "title", "steps", "duration_s", "test", "annotate_background", "annotate_edited_pitch", "player_report_target", "started", "ended", "exit_code", "status", "notes", "note")}
     out["log_shown"] = paths.shown(meta.get("log_file"))
     return out
 
@@ -34,6 +34,16 @@ def _public(meta):
 @router.get("/api/run/steps")
 def steps():
     return [{"id": i, "label": l, "help": h} for i, l, h in runner.STEPS]
+
+
+@router.get("/api/games/{game_id}/player-report/targets")
+def player_report_targets(game_id: int, conn=Depends(_get_conn)):
+    """Named players + whole-team choices for the Player report dropdown."""
+    g = repo.get_game(conn, game_id, with_detail=False)
+    if g is None:
+        raise HTTPException(404, "Game not found")
+    from reports.player_report.metrics import list_report_targets
+    return {"targets": list_report_targets(game_id, g)}
 
 
 @router.get("/api/run")
@@ -47,7 +57,8 @@ def start_run(game_id: int, body: dict, request: Request, conn=Depends(_get_conn
     try:
         meta = runner.start(conn, game_id, body.get("steps") or [], body.get("duration_s"),
                             annotate_background=body.get("annotate_background"),
-                            annotate_edited_pitch=body.get("annotate_edited_pitch"))
+                            annotate_edited_pitch=body.get("annotate_edited_pitch"),
+                            player_report_target=body.get("player_report_target"))
     except paths.GameFolderError as e:
         raise repo.ValidationError(str(e))
     return {"run": _public(meta)}

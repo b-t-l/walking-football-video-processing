@@ -1,6 +1,6 @@
 from data import CreateDatabase
 from video_annotator import CreateVideoAnnotated
-from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport
+from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport,CreatePlayerReport
 from team_images import ExtractTeamImages
 from ball_images import ExtractBallImages
 from broadcast_pitch_images import ExtractBroadcastPitchImages
@@ -39,6 +39,8 @@ def main():
     RUN_BROADCAST_PITCH_IMAGES = False  # save frames from the broadcast (edited) video for Roboflow pitch-keypoint labelling
     RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
     RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
+    RUN_PLAYER_REPORT = False  # PDF per selected player (or whole team): distance, max speed, pitch dots coloured by possession
+    PLAYER_REPORT_TARGET = "named"  # named | roster:<id> | team:<Team Name> | track:<id>
 
     # DETECTION SETTINGS FOR VIDEO:
     PITCH_DETECTION_OVERRIDE = True    # do we want to overide pitch detection and rather temp provide the vertices from our logger file instead ?
@@ -52,18 +54,20 @@ def main():
     import argparse
     _ap = argparse.ArgumentParser()
     _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, player_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
     _ap.add_argument('--annotate-background', choices=['analysis', 'edited'], default='analysis',
                      help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard, overhead map)')
     _ap.add_argument('--annotate-edited-pitch', action='store_true',
                      help='when background is edited: run the pitch-keypoint model and draw dotted thirds (slower)')
+    _ap.add_argument('--player-report',
+                     help="who to include in the player report: named | roster:<id> | team:<Team Name> | track:<id>")
     _args, _unknown = _ap.parse_known_args()
     if _args.game is not None:
         GAME_ID = _args.game
     if _args.steps is not None:
         _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description'}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'player_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description'}
         if _unknown_steps:
             raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
         RUN_DETECTIONS = 'detections' in _steps
@@ -71,6 +75,7 @@ def main():
         RUN_DETECTIONS_REPORT = 'detection_report' in _steps
         RUN_MATCH_REPORT = 'match_report' in _steps
         RUN_OPPOSITION_REPORT = 'opposition_report' in _steps
+        RUN_PLAYER_REPORT = 'player_report' in _steps
         RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
         RUN_TEAM_IMAGES = 'team_images' in _steps
         RUN_BALL_IMAGES = 'ball_images' in _steps
@@ -79,6 +84,10 @@ def main():
         RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
     ANNOTATE_BACKGROUND = _args.annotate_background or 'analysis'
     ANNOTATE_EDITED_PITCH = bool(getattr(_args, 'annotate_edited_pitch', False))
+    if getattr(_args, 'player_report', None):
+        PLAYER_REPORT_TARGET = _args.player_report
+        if _args.steps is None:
+            RUN_PLAYER_REPORT = True
     TEST_RUN = bool(_args.duration)
     if TEST_RUN:
         DURATION = _args.duration
@@ -254,6 +263,16 @@ def main():
                                             GAME_RECORD,
                                             DETECTION_FPS)
         opposition.run()
+
+    # - PLAYER REPORT: distance / speed / possession-coloured pitch dots for named players or a whole team
+    if RUN_PLAYER_REPORT == True:
+        player_report = CreatePlayerReport(DATABASE_FILE,
+                                           OUTPUT_PATH,
+                                           TEAMS,
+                                           GAME_RECORD,
+                                           DETECTION_FPS,
+                                           target=PLAYER_REPORT_TARGET)
+        player_report.run()
 
     # - TEAM TRAINING IMAGES: players from 10 random frames saved as pictures, filed by what the team model said
     if RUN_TEAM_IMAGES == True:

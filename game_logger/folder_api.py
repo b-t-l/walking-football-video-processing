@@ -58,20 +58,46 @@ def open_folder(game_id: int, conn=Depends(_get_conn)):
 REPORT_KINDS = {".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8"}
 
 
+# Allowed one-level subfolders under reports/ (and reports/test/)
+REPORT_SUBFOLDERS = ("Players",)
+
+
 def _report_dirs(game_id):
+    """(is_test, absolute_dir, url_prefix) — url_prefix is '' or 'Players' for the open link."""
     folder = paths.game_folder(game_id)
     if not folder:
         return []
     base = os.path.join(folder, "reports")
-    return [(False, base), (True, os.path.join(base, "test"))]
+    out = [(False, base, ""), (True, os.path.join(base, "test"), "")]
+    for sub in REPORT_SUBFOLDERS:
+        out.append((False, os.path.join(base, sub), sub))
+        out.append((True, os.path.join(base, "test", sub), sub))
+    return out
+
+
+def _safe_report_name(name):
+    """Allow 'file.pdf' or 'Players/file.pdf' only — no '..' or other folders."""
+    if not name or name.startswith(".") or ".." in name or name.startswith("/") or "\\" in name:
+        return None
+    parts = name.replace("\\", "/").split("/")
+    if len(parts) == 1:
+        base, prefix = parts[0], ""
+    elif len(parts) == 2 and parts[0] in REPORT_SUBFOLDERS:
+        prefix, base = parts[0], parts[1]
+    else:
+        return None
+    ext = os.path.splitext(base)[1].lower()
+    if base.startswith(".") or ext not in REPORT_KINDS:
+        return None
+    return prefix, base, ext
 
 
 @router.get("/api/games/{game_id}/reports")
 def list_reports(game_id: int, conn=Depends(_get_conn)):
-    """The PDF and text reports in the game's reports folder (and its test folder), newest first."""
+    """The PDF and text reports in the game's reports folder (and Players / test), newest first."""
     _need_game(conn, game_id)
     out = []
-    for is_test, d in _report_dirs(game_id):
+    for is_test, d, prefix in _report_dirs(game_id):
         try:
             names = os.listdir(d)
         except OSError:
@@ -82,7 +108,8 @@ def list_reports(game_id: int, conn=Depends(_get_conn)):
             if n.startswith(".") or ext not in REPORT_KINDS or not os.path.isfile(p):
                 continue
             st = os.stat(p)
-            out.append({"name": n, "test": is_test, "size": st.st_size, "mtime": st.st_mtime,
+            shown = f"{prefix}/{n}" if prefix else n
+            out.append({"name": shown, "test": is_test, "size": st.st_size, "mtime": st.st_mtime,
                         "when": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%d %b %Y %H:%M"), "kind": ext[1:]})
     out.sort(key=lambda r: r["mtime"], reverse=True)
     return out
@@ -90,13 +117,16 @@ def list_reports(game_id: int, conn=Depends(_get_conn)):
 
 @router.get("/api/games/{game_id}/reports/file")
 def report_file(game_id: int, name: str, test: bool = False, conn=Depends(_get_conn)):
-    """One report, shown in the browser. Only plain file names inside the reports folders are served."""
+    """One report, shown in the browser. Plain names or Players/<file> under reports/."""
     _need_game(conn, game_id)
-    ext = os.path.splitext(name)[1].lower()
-    if name != os.path.basename(name) or name.startswith(".") or ext not in REPORT_KINDS:
+    parsed = _safe_report_name(name)
+    if not parsed:
         raise HTTPException(404, "No such report")
-    for is_test, d in _report_dirs(game_id):
-        p = os.path.join(d, name)
-        if is_test == bool(test) and os.path.isfile(p):
-            return FileResponse(p, media_type=REPORT_KINDS[ext], headers={"Content-Disposition": f'inline; filename="{name}"'})
+    prefix, base, ext = parsed
+    for is_test, d, dir_prefix in _report_dirs(game_id):
+        if is_test != bool(test) or dir_prefix != prefix:
+            continue
+        p = os.path.join(d, base)
+        if os.path.isfile(p):
+            return FileResponse(p, media_type=REPORT_KINDS[ext], headers={"Content-Disposition": f'inline; filename="{base}"'})
     raise HTTPException(404, "No such report")

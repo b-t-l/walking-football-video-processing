@@ -13,6 +13,7 @@ from .calibrator_api import router as calibrator_router
 from .video_api import router as video_router
 from .folder_api import router as folder_router
 from .run_api import router as run_router
+from .identity_api import router as identity_router
 from .record import RECORD_KEYS, build_game_record
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -274,6 +275,7 @@ app.include_router(calibrator_router)
 app.include_router(video_router)
 app.include_router(folder_router)
 app.include_router(run_router)
+app.include_router(identity_router)
 class _NoCacheStaticFiles(StaticFiles):
     """the pages are local and small: always re-check the files, so a code change shows up on the next reload"""
     async def get_response(self, path, scope):

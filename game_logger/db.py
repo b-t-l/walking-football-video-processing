@@ -6,7 +6,7 @@ import datetime
 
 from . import config
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 SCHEMA_V1 = """
 CREATE TABLE settings (
@@ -90,6 +90,23 @@ MIGRATIONS = {
     ],
     3: [                                                        # v4: mens / womens / both squad on each player (Polis has both)
         "ALTER TABLE players ADD COLUMN squad TEXT NOT NULL DEFAULT 'mens'",
+    ],
+    4: [                                                        # v5: manual name ↔ track links for the Identity page
+        """CREATE TABLE identity_assignments (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id           INTEGER NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+            roster_player_id  INTEGER NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+            track_player_id   INTEGER NOT NULL,
+            from_frame        INTEGER NOT NULL,
+            to_frame          INTEGER,
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX idx_identity_game ON identity_assignments(game_id)",
+        "CREATE INDEX idx_identity_roster ON identity_assignments(game_id, roster_player_id)",
+        "CREATE INDEX idx_identity_track ON identity_assignments(game_id, track_player_id)",
+    ],
+    5: [                                                        # v6: skip a break when the player is off-camera / not detected
+        "ALTER TABLE identity_assignments ADD COLUMN skip_until_frame INTEGER",
     ],
 }
 
