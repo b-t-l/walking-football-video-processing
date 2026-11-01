@@ -1,0 +1,1892 @@
+"use strict";
+// Game logger front end: plain JavaScript, no build step. Pages: #/ (games), #/game/new, #/game/<id>, #/teams, #/settings
+
+const view = document.getElementById("view");
+let META = null;
+let dirty = false;
+let currentHash = location.hash || "#/";
+let suppressNext = false;
+const listState = { q: "", type: "", format: "", status: "", archived: false };
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json", "X-GL-App": "1" } : { "X-GL-App": "1" }, body: body ? JSON.stringify(body) : undefined });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* not json */ }
+  if (!res.ok) {
+    const err = new Error((data && (data.errors || data.detail)) || res.statusText);
+    err.errors = data && data.errors ? data.errors : [data && data.detail ? data.detail : res.statusText];
+    throw err;
+  }
+  return data;
+}
+
+let toastTimer = null;
+function toast(msg, bad) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "toast" + (bad ? " bad" : ""); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, bad ? 6000 : 2800);
+}
+
+function notice(kind, title, items) {
+  const list = items && items.length ? `<ul>${items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : "";
+  return `<div class="notice ${kind}">${title ? `<b>${esc(title)}</b>` : ""}${list}</div>`;
+}
+
+function opts(values, selected, blank) {
+  const all = values.includes(selected) || !selected ? values : [...values, selected];
+  return (blank ? `<option value="">${esc(blank)}</option>` : "") + all.map(v => `<option ${v === selected ? "selected" : ""}>${esc(v)}</option>`).join("");
+}
+
+function statusChips(g) {
+  const chips = [];
+  if (g.archived) chips.push(`<span class="chip">Archived</span>`);
+  if (g.ready) chips.push(`<span class="chip ok">Ready to process</span>`);
+  else g.missing.forEach(m => chips.push(`<span class="chip warn">${esc(m)}</span>`));
+  if (g.processed) chips.push(`<span class="chip info">Processed</span>`);
+  return chips.join("");
+}
+
+// ---------------------------------------------------------------------------------------------- router
+
+async function route() {
+  const hash = location.hash || "#/";
+  setNav(hash);
+  try {
+    if (!META) META = await api("GET", "/api/meta");
+    if (hash === "#/" || hash === "") await gamesPage();
+    else if (hash === "#/game/new") await gamePage(null);
+    else if (/^#\/game\/\d+\/identity$/.test(hash)) await identityPage(parseInt(hash.split("/")[2], 10));
+    else if (hash.startsWith("#/game/")) await gamePage(parseInt(hash.slice(7), 10));
+    else if (hash === "#/teams") await teamsPage();
+    else if (hash === "#/settings") await settingsPage();
+    else view.innerHTML = `<div class="card">Page not found. <a href="#/">Back to the games</a></div>`;
+  } catch (e) {
+    view.innerHTML = notice("bad", "Something went wrong", e.errors || [e.message]);
+  }
+}
+
+// The navbar: links on the list pages; back button, title and the page's actions on a game page.
+function setNav(hash) {
+  const isGame = hash.startsWith("#/game/");
+  document.getElementById("nav-links").hidden = isGame;
+  document.getElementById("nav-context").hidden = !isGame;
+  document.getElementById("nav-actions").innerHTML = "";
+  if (isGame) {
+    const navBack = document.getElementById("nav-back");
+    if (navBack && !/\/identity$/.test(hash)) {
+      navBack.href = "#/";
+      navBack.innerHTML = "&larr; All games";
+    }
+    if (hash === "#/game/new") document.getElementById("nav-title").textContent = "New game";
+    else if (/\/identity$/.test(hash)) document.getElementById("nav-title").textContent = "Track Players · Game " + hash.split("/")[2];
+    else document.getElementById("nav-title").textContent = "Game " + hash.slice(7);
+  }
+  document.querySelectorAll("#nav-links a").forEach(a => {
+    const n = a.dataset.nav;
+    a.classList.toggle("active", (n === "games" && hash === "#/") || (n !== "games" && hash.startsWith("#/" + n)));
+  });
+}
+
+window.addEventListener("hashchange", () => {
+  if (suppressNext) { suppressNext = false; return; }
+  if (dirty && !confirm("You have unsaved changes on this page. Leave without saving?")) {
+    suppressNext = true; location.hash = currentHash; return;
+  }
+  dirty = false; currentHash = location.hash || "#/"; route();
+});
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+route();
+
+// ---------------------------------------------------------------------------------------------- games list
+
+async function gamesPage() {
+  const games = await api("GET", `/api/games?archived=${listState.archived}`);
+  if ((location.hash || "#/") !== "#/") return;
+  view.innerHTML = `
+    <div class="row spread" style="margin-bottom:14px"><h1 style="margin:0">Games</h1>
+      <a class="btn primary" href="#/game/new">+ New game</a></div>
+    <div class="card">
+      <div class="filters">
+        <div class="grow"><label>Search</label><input id="f-q" placeholder="Title, team, date, id..." value="${esc(listState.q)}"></div>
+        <div><label>Type</label><select id="f-type">${opts(META.game_types, listState.type, "All")}</select></div>
+        <div><label>Format</label><select id="f-format">${opts(META.game_formats, listState.format, "All")}</select></div>
+        <div><label>Status</label><select id="f-status">
+          ${[["", "All"], ["ready", "Ready to process"], ["attention", "Needs attention"], ["processed", "Processed"]].map(([v, l]) => `<option value="${v}" ${listState.status === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div><label>&nbsp;</label><label style="display:flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="f-arch" ${listState.archived ? "checked" : ""}> Show archived</label></div>
+      </div>
+      <table><thead><tr><th>ID</th><th>Date</th><th>Game</th><th>Kits</th><th>Type</th><th>Score</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table>
+      <p class="muted small" id="count"></p>
+    </div>`;
+  // the two teams' kit colours as small dots: team A, "v", team B (hover for the team name)
+  const kitDots = g => {
+    const dots = (cols, name) => cols && cols.length
+      ? `<span title="${esc(name)}" style="white-space:nowrap">${cols.map(c => `<span class="swatch" style="background:rgb(${c.join(",")});width:15px;height:15px;margin-right:2px"></span>`).join("")}</span>`
+      : `<span class="muted small" title="${esc(name)}: no kit colours set">-</span>`;
+    return `<span style="white-space:nowrap">${dots(g.team_a_colours, g.team_a)} <span class="muted small">v</span> ${dots(g.team_b_colours, g.team_b)}</span>`;
+  };
+  const draw = () => {
+    const q = listState.q.trim().toLowerCase();
+    const shown = games.filter(g => {
+      if (listState.type && g.game_type !== listState.type) return false;
+      if (listState.format && g.game_format !== listState.format) return false;
+      if (listState.status === "ready" && !g.ready) return false;
+      if (listState.status === "attention" && g.ready) return false;
+      if (listState.status === "processed" && !g.processed) return false;
+      if (q && ![g.game_id, g.title, g.team_a, g.team_b, g.date_display, g.description].join(" ").toLowerCase().includes(q)) return false;
+      return true;
+    });
+    document.getElementById("rows").innerHTML = shown.map(g => `
+      <tr class="click ${g.archived ? "archived" : ""}" data-id="${g.game_id}">
+        <td>${g.game_id}</td><td>${esc(g.date_display) || '<span class="muted">-</span>'}</td>
+        <td><b>${esc(g.title)}</b>${g.description ? `<div class="muted small">${esc(g.description)}</div>` : ""}</td>
+        <td>${kitDots(g)}</td>
+        <td>${esc([g.game_type, g.game_format].filter(Boolean).join(" / "))}</td>
+        <td>${esc(g.score) || '<span class="muted">-</span>'}</td><td>${statusChips(g)}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">No games match.</td></tr>`;
+    document.getElementById("count").textContent = `${shown.length} of ${games.length} games`;
+    document.querySelectorAll("#rows tr[data-id]").forEach(tr => tr.onclick = () => { location.hash = "#/game/" + tr.dataset.id; });
+  };
+  const bind = (id, key, ev = "input") => document.getElementById(id).addEventListener(ev, e => { listState[key] = e.target.value; draw(); });
+  bind("f-q", "q"); bind("f-type", "type", "change"); bind("f-format", "format", "change"); bind("f-status", "status", "change");
+  document.getElementById("f-arch").onchange = e => { listState.archived = e.target.checked; gamesPage(); };
+  draw();
+}
+
+// ---------------------------------------------------------------------------------------------- game page
+
+const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); };
+const parseT = v => { v = (v || "").trim(); if (!v) return null; const p = v.split(":"); if (p.length > 3 || p.some(x => !/^\d+$/.test(x))) return null; return p.reduce((a, x) => a * 60 + parseInt(x, 10), 0); };
+
+function secOpen(name, dflt) { try { const v = localStorage.getItem("gl-sec-" + name); return v === null ? dflt : v === "1"; } catch (e) { return dflt; } }
+function idAccOpen() { try { const v = localStorage.getItem("gl-sec-idacc"); return v === null ? "asg" : v; } catch (e) { return "asg"; } }
+function secSave(name, open) { try { localStorage.setItem("gl-sec-" + name, open ? "1" : "0"); } catch (e) { /* ignore */ } }
+
+function secNum(n) { return n ? `<span class="sec-num" title="Step ${n} of 5">${n}</span>` : ""; }
+
+function sec(name, title, body, isNew, num) {
+  return `<details class="sec" data-sec="${name}" ${isNew || secOpen(name, false) ? "open" : ""}><summary>${secNum(num)}<span class="sec-title">${title}</span><span class="sec-sum" id="sum-${name}"></span></summary><div class="sec-body">${body}</div></details>`;
+}
+
+function exclusionRow(ex = {}) {
+  return `<tr><td><input class="ex-start" placeholder="MM:SS" value="${esc(ex.start || "")}"></td>
+    <td><input class="ex-end" placeholder="MM:SS" value="${esc(ex.end || "")}"></td>
+    <td><input class="ex-reason" placeholder="e.g. goalkeeper change, ball out for a long time" value="${esc(ex.reason || "")}"></td>
+    <td><button type="button" class="link ex-del" title="Remove">Remove</button></td></tr>`;
+}
+
+let keyHandler = null;
+let rememberedPlayer = null;      // keeps the video position across the page reload that follows a save
+
+async function gamePage(id) {
+  const teams = await api("GET", "/api/teams");
+  const isNew = id === null;
+  let g = isNew ? { game_id: "", date_display: "", game_type: "league", game_format: "mens", title: "", description: "", notes: "",
+    team_a_id: null, team_b_id: null, score_a: null, score_b: null, source_video: "", output_video: "", edited_video: "", youtube_360_video: "",
+    running_speed_km_h: null, game_start: "", half_time_start: "", half_time_end: "", game_end: "", exclusions: [], calibrations: [], missing: [], archived: false } : await api("GET", `/api/games/${id}`);
+  if (location.hash !== (isNew ? "#/game/new" : "#/game/" + id)) return;
+  const teamOpts = sel => `<option value="">- not set -</option>` + teams.filter(t => t.is_active || t.team_id === sel).map(t => `<option value="${t.team_id}" ${t.team_id === sel ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  const v = x => esc(x ?? "");
+
+  const matchBody = `<div class="grid" style="margin-top:14px">
+        <div class="c2"><label>Game id</label>${isNew ? `<input id="game_id" type="number" min="0" placeholder="${META.next_game_id}">` : `<input value="${g.game_id}" disabled>`}</div>
+        <div class="c3"><label>Date</label><input id="date" type="date" value="${v(g.date_display)}"></div>
+        <div class="c3"><label>Type</label><select id="game_type">${opts(META.game_types, g.game_type, "-")}</select></div>
+        <div class="c4"><label>Format</label><select id="game_format">${opts(META.game_formats, g.game_format, "-")}</select></div>
+        <div class="c5"><label>Team A</label><select id="team_a_id">${teamOpts(g.team_a_id)}</select></div>
+        <div class="c2"><label>Score</label><div class="row" style="flex-wrap:nowrap"><input id="score_a" class="score" type="number" min="0" value="${v(g.score_a)}"><span>-</span><input id="score_b" class="score" type="number" min="0" value="${v(g.score_b)}"></div></div>
+        <div class="c5"><label>Team B</label><select id="team_b_id">${teamOpts(g.team_b_id)}</select></div>
+        <div class="c12"><label>Title <span class="small">(leave blank to use "Team A vs Team B"; it also names the output files)</span></label><input id="title" value="${v(g.title)}"></div>
+        <div class="c6"><label>Description</label><textarea id="description">${v(g.description)}</textarea></div>
+        <div class="c6"><label>Notes <span class="small">(for you; the pipeline ignores these)</span></label><textarea id="notes">${v(g.notes)}</textarea></div>
+      </div>`;
+  const slotOf = { edited_video: "edited", source_video: "analysis" };
+  const autoInfo = f => (g.videos && g.videos[slotOf[f]]) || null;
+  const gamePrefix = isNew ? "" : String(g.game_id).padStart(4, "0");
+  const vfield = (id, title, help, browseTitle) => {
+    const a = autoInfo(id), ph = a && a.auto && a.path ? "auto: " + a.shown : "";
+    return `<div class="c12"><label>${title} <span class="small">${help}</span></label>
+          <div class="row" style="flex-wrap:nowrap"><input id="${id}" value="${v(g[id])}" placeholder="${esc(ph)}"><button type="button" data-browse="${id}" data-title="${esc(browseTitle)}">Browse...</button></div><div id="check-${id}" class="small muted" style="margin-top:4px"></div></div>`;
+  };
+  const videoBody = `<div id="folder-box" class="folder-box"></div>
+      <p class="muted small" style="margin:10px 0 0">The analysis and edited videos are found automatically by name in the game's folder (${gamePrefix || "0022"}_analysis.mp4 and ${gamePrefix || "0022"}_edited.mp4). Only fill them in for a video kept somewhere else. All of the game's videos can be played in the player at the top of the page.</p>
+      <div class="grid" style="margin-top:10px">
+        ${vfield("edited_video", "Edited video", "(the TV-style version that pans to follow the game)", "Choose the edited video")}
+        ${vfield("source_video", "Analysis video", "(the video the pipeline uses for detections; game times are measured on this one)", "Choose the analysis video")}
+        <div class="c6"><label>Annotated video link <span class="small">(the YouTube link once uploaded; the stats report uses it for chapter links. Annotated video files are found in the game folder.)</span></label><input id="output_video" value="${v(g.output_video)}"></div>
+        <div class="c6"><label>YouTube 360 link</label><input id="youtube_360_video" value="${v(g.youtube_360_video)}"></div>
+      </div>`;
+
+  const timingsBody = `<p class="muted small" style="margin:12px 0 0">Minutes:seconds into the analysis video, e.g. 12:34 (1:02:30 also works). With the player above you can set these from the current time.</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="c3"><label>Game start</label><input id="game_start" placeholder="MM:SS" value="${v(g.game_start)}"></div>
+        <div class="c3"><label>Half-time start</label><input id="half_time_start" placeholder="MM:SS" value="${v(g.half_time_start)}"></div>
+        <div class="c3"><label>Half-time end</label><input id="half_time_end" placeholder="MM:SS" value="${v(g.half_time_end)}"></div>
+        <div class="c3"><label>Game end</label><input id="game_end" placeholder="MM:SS" value="${v(g.game_end)}"></div>
+        <div class="c3"><label>Running speed km/h <span class="small">(blank = ${META.running_speed_km_h})</span></label><input id="running_speed_km_h" type="number" step="0.5" value="${v(g.running_speed_km_h)}"></div>
+      </div>
+      <h2 style="margin-top:18px">Extra exclusions <span class="muted small">parts of the video the pipeline should skip</span></h2>
+      <table><thead><tr><th style="width:140px">From</th><th style="width:140px">To</th><th>Reason</th><th></th></tr></thead><tbody id="ex-rows">${(g.exclusions || []).map(exclusionRow).join("")}</tbody></table>
+      <button type="button" id="ex-add" style="margin-top:8px">+ Add exclusion</button>`;
+
+  const savedSteps = (() => { try { return JSON.parse(localStorage.getItem("gl-run-steps") || "null"); } catch (e) { return null; } })() || ["detections", "transformations", "annotation"];
+  const savedAnnotateBg = (() => { try { return localStorage.getItem("gl-annotate-bg") || "analysis"; } catch (e) { return "analysis"; } })();
+  const savedEditedPitch = (() => { try { return localStorage.getItem("gl-annotate-edited-pitch") === "1"; } catch (e) { return false; } })();
+  const savedPlayerReport = (() => { try { return localStorage.getItem("gl-player-report-target") || ""; } catch (e) { return ""; } })();
+  const hasEditedVideo = !!(g.videos && g.videos.edited && g.videos.edited.exists);
+  const annotateBg = (savedAnnotateBg === "edited" && hasEditedVideo) ? "edited" : "analysis";
+  const annotateOptsHtml = `
+      <div class="run-annotate-bg" id="run-annotate-bg-row">
+        <label>Background video <select id="run-annotate-bg" style="width:auto">
+          <option value="analysis" ${annotateBg === "analysis" ? "selected" : ""}>Analysis video</option>
+          <option value="edited" ${annotateBg === "edited" ? "selected" : ""} ${hasEditedVideo ? "" : "disabled"}>Edited video${!hasEditedVideo ? " (none for this game)" : ""}</option>
+        </select></label>
+        <span class="small muted">Used when Annotated video is ticked. Edited draws the header, dashboard and overhead map (no boxes or analysis outline).</span>
+        <label id="run-edited-pitch-row" style="display:block;margin-top:8px">
+          <input type="checkbox" id="run-edited-pitch" ${savedEditedPitch ? "checked" : ""}>
+          <b>Pitch thirds on edited video</b>
+          <span class="small muted">Runs the pitch-keypoint model on every frame (slower). Only applies when Background is Edited.</span>
+        </label>
+      </div>
+`;
+  const playerReportOptsHtml = `
+      <div class="run-annotate-bg" id="run-player-report-row" style="opacity:0.55">
+        <label>Player report for <select id="run-player-report" style="width:auto;min-width:14em" disabled data-saved="${esc(savedPlayerReport)}">
+          <option value="">Loading…</option>
+        </select></label>
+        <span class="small muted">Used when Player report is ticked. Name players on Track Players for named options; whole-team always available.</span>
+      </div>
+`;
+  const runBody = isNew ? "" : `
+      ${RUN_GROUPS.map(([title, note, ids]) => `<div class="run-group"><div class="run-group-h"><b>${title}</b><div class="small muted">${note}</div></div>
+      <div class="run-steps">${RUN_STEPS.filter(x => ids.includes(x[0])).map(([k, l, h]) => `<label class="run-step"><input type="checkbox" data-step="${k}" ${savedSteps.includes(k) ? "checked" : ""}> <b>${l}</b> <span class="chip" data-chip="${k}" hidden></span> <span class="info-i" tabindex="0" role="note" aria-label="${esc(h)}" data-tip="${esc(h)}" onclick="event.preventDefault();event.stopPropagation()">i</span></label>${k === "annotation" ? annotateOptsHtml : ""}${k === "player_report" ? playerReportOptsHtml : ""}`).join("")}</div></div>`).join("")}
+      <div class="run-group"><div class="run-group-h"><b>Run</b><div class="small muted">stages always run in the order shown above, whatever order you tick them</div></div></div>
+      <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
+        <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
+      <div class="run-test" id="run-stale-row" hidden><label><input type="checkbox" id="run-allow-stale"> <b>Run anyway</b> even though an earlier step is out of date <span class="small muted">(the results may not match each other)</span></label></div>
+      <div class="row" style="margin-top:12px;gap:10px"><span id="run-status" class="small"></span></div>
+      <div id="run-msg"></div>
+      <div class="run-view" id="run-view">
+        <div class="run-view-bar"><span class="row" style="gap:14px;align-items:center"><span class="run-view-title">Run output</span><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label></span><span class="row" style="gap:8px"><button type="button" class="danger" id="run-stop2" disabled>Stop</button><button type="button" id="run-max-close">Close full window</button></span></div>
+        <div class="run-bar" id="run-bar" hidden><div id="run-bar-fill"></div></div>
+        <div class="small muted run-line" id="run-line"></div>
+        <pre class="console" id="run-console">Nothing has been run yet.</pre>
+      </div>
+      <div class="row spread" style="margin-top:8px"><span class="small muted">Esc closes the full window view.</span>
+        <span class="row" style="gap:8px"><select id="run-past" style="width:auto;max-width:360px"><option value="">Earlier runs...</option></select><button type="button" id="run-past-view">Show log</button><button type="button" id="run-back" hidden>Back to current</button></span></div>
+      <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs, text files and review-sheet spreadsheets in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
+
+  const stage = isNew ? "" : `
+    <section class="stage-band" id="stage">
+      <div class="stage-main">
+        <video id="pv" controls preload="metadata" playsinline></video>
+        <div id="pv-msg" class="pv-msg" hidden></div>
+      </div>
+      <div class="stage-side">
+        <div><label>Video</label><select id="vsel"></select><div id="pv-hint" class="small" style="color:#f0b955;margin-top:4px" hidden></div></div>
+        <div class="pv-time"><span id="pv-cur">00:00</span><span class="pv-dur"> / <span id="pv-dur">--:--</span></span></div>
+        <div class="pv-skip">
+          <button type="button" data-skip="-30">&minus;30s</button><button type="button" data-skip="-5">&minus;5s</button><button type="button" data-skip="-0.0417" title="One frame back">&#9666; frame</button>
+          <button type="button" data-skip="0.0417" title="One frame forward">frame &#9656;</button><button type="button" data-skip="5">+5s</button><button type="button" data-skip="30">+30s</button>
+        </div>
+        <div class="row" style="gap:10px"><label style="margin:0">Speed</label><select id="pv-speed" style="width:auto">${[0.5, 1, 2, 4, 8].map(s => `<option value="${s}" ${s === 1 ? "selected" : ""}>${s}x</option>`).join("")}</select>
+          <label id="pv-proxy-wrap" style="margin:0;display:none;gap:5px;align-items:center"><input type="checkbox" id="pv-proxy"> lighter preview copy</label></div>
+        <div id="pv-proxy-area" class="small"></div>
+        <div id="pv-marks" class="pv-marks">
+          <div class="pv-mh">Mark from the player <span>(then Save)</span></div>
+          ${[["game_start", "Game start"], ["half_time_start", "Half-time start"], ["half_time_end", "Half-time end"], ["game_end", "Game end"]].map(([f, l]) =>
+            `<div class="mk"><span class="mk-l">${l}</span><button type="button" class="mk-go" data-go="${f}" title="Jump to this time">--:--</button><button type="button" class="mk-set" data-set="${f}">Set here</button></div>`).join("")}
+          <div class="mk"><span class="mk-l">Exclusion</span><button type="button" data-ex="start">Start here</button><button type="button" data-ex="end">End here</button></div>
+        </div>
+      </div>
+    </section>`;
+
+  view.innerHTML = `
+    ${isNew ? "" : `<div style="margin-bottom:12px">${statusChips(g)}</div>`}
+    <div id="msgs"></div>
+    ${stage}
+    ${isNew ? "" : `<p class="sec-order small muted">Work down the numbered sections: <b>1</b> match, <b>2</b> video files, <b>3</b> timings, <b>4</b> pitch calibration, then <b>5</b> run.</p>`}
+    <div class="sec-tools"><button type="button" class="link" id="sec-open">Expand all</button><button type="button" class="link" id="sec-close">Collapse all</button></div>
+    <form id="form" autocomplete="off">
+      ${sec("match", "Match", matchBody, isNew, 1)}
+      ${sec("video", "Video files", videoBody, isNew, 2)}
+      ${sec("timings", "Timings &amp; exclusions", timingsBody, isNew, 3)}
+    </form>
+    ${isNew ? `<details class="sec" open><summary>${secNum(4)}<span class="sec-title">Pitch calibration</span><span class="sec-sum">Save the game first, then add its pitch calibration here.</span></summary></details>`
+      : `<details class="sec" data-sec="cal" id="cal-card" ${secOpen("cal", false) ? "open" : ""}><summary>${secNum(4)}<span class="sec-title">Pitch calibration</span><span class="sec-sum" id="sum-cal"></span><a class="btn primary sec-act" id="sum-act" href="/calibrator?game=${g.game_id}">Calibrate pitch</a></summary><div class="sec-body" id="cal-body"></div></details>
+         <details class="sec" data-sec="run" id="run-card" ${secOpen("run", false) ? "open" : ""}><summary>${secNum(5)}<span class="sec-title">Run</span><span class="sec-sum" id="sum-run">detections, reports and the annotated video</span><span class="sec-btns" onclick="event.preventDefault()"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><button type="button" id="run-max" title="Fill the browser window with the run output (Esc to go back)">Full window</button></span></summary><div class="sec-body">${runBody}</div></details>
+         <details class="sec" data-sec="rec" ${secOpen("rec", false) ? "open" : ""} id="rec-details"><summary><span class="sec-title">What the pipeline is given</span><span class="sec-sum">the exact record for this game</span></summary><div class="sec-body"><pre class="rec" id="rec">Loading...</pre></div></details>`}`;
+
+  const $ = id => document.getElementById(id);
+  const form = $("form");
+  document.getElementById("nav-title").textContent = isNew ? "New game" : `Game ${g.game_id}: ${g.title}`;
+  document.getElementById("nav-actions").innerHTML = `<span class="gl-note" id="dirty-note"></span>` +
+    (isNew ? "" : `<a class="gl-btn" href="#/game/${g.game_id}/identity"><svg class="gl-btn-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="4.2" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.2 13.2c.6-2.4 2.2-3.6 4.8-3.6s4.2 1.2 4.8 3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12.2" cy="10.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="M12.2 8.4v3.6M10.4 10.2h3.6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>Track Players</a><button type="button" class="gl-btn" id="dup">Duplicate</button><button type="button" class="gl-btn" id="arch">${g.archived ? "Unarchive" : "Archive"}</button><button type="button" class="gl-btn danger" id="del">Delete</button>`) +
+    `<button type="submit" form="form" class="gl-btn primary" id="save">Save</button>`;
+
+  // collapsible sections: remember which are open
+  const setAll = open => document.querySelectorAll("details.sec[data-sec]").forEach(d => { d.open = open; });
+  $("sec-open").onclick = () => setAll(true); $("sec-close").onclick = () => setAll(false);
+  document.querySelectorAll("details.sec[data-sec]").forEach(d => d.addEventListener("toggle", () => { if (!isNew) secSave(d.dataset.sec, d.open); }));
+
+  // one-line summaries shown while a section is collapsed
+  const videoFound = { edited_video: null, source_video: null };
+  const val = k => ($(k) ? $(k).value.trim() : "");
+  const teamName = k => { const el = $(k); return el && el.value ? el.options[el.selectedIndex].text : ""; };
+  const refreshSummaries = () => {
+    const set = (n, html) => { const el = $("sum-" + n); if (el) el.innerHTML = html; };
+    const title = val("title") || [teamName("team_a_id"), teamName("team_b_id")].filter(Boolean).join(" vs ");
+    const score = val("score_a") !== "" && val("score_b") !== "" ? `${val("score_a")}-${val("score_b")}` : "";
+    set("match", esc([title, score, val("date"), [val("game_type"), val("game_format")].filter(Boolean).join(" / ")].filter(Boolean).join("  ·  ")));
+    const vparts = [["edited_video", "Edited"], ["source_video", "Analysis"]].map(([f, l]) => {
+      const ai = autoInfo(f);
+      if (!val(f) && !(ai && ai.path)) return f === "source_video" ? `<span style="color:var(--warn)">no analysis video</span>` : "";
+      const fd = val(f) ? videoFound[f] : (ai ? ai.exists : null);
+      return `${l} ` + (fd === false ? `<span style="color:var(--warn)">not found</span>` : fd ? `<span style="color:var(--ok)">found</span>` : "set");
+    }).filter(Boolean);
+    if (val("output_video")) vparts.push("YouTube link set");
+    set("video", vparts.length ? vparts.join("  ·  ") : `<span style="color:var(--warn)">no videos chosen</span>`);
+    const n = document.querySelectorAll("#ex-rows tr").length;
+    const t = [val("game_start") || val("game_end") ? `${val("game_start") || "?"} to ${val("game_end") || "?"}` : "", val("half_time_start") ? `half-time ${val("half_time_start")}-${val("half_time_end") || "?"}` : "", n ? `${n} exclusion${n > 1 ? "s" : ""}` : ""].filter(Boolean);
+    set("timings", t.length ? esc(t.join("  ·  ")) : `<span style="color:var(--warn)">not set</span>`);
+  };
+  const refreshMarks = () => {
+    document.querySelectorAll(".mk-go").forEach(b => { b.textContent = val(b.dataset.go) || "--:--"; });
+  };
+  const markDirty = () => { dirty = true; $("dirty-note").textContent = "Unsaved changes"; };
+  form.addEventListener("input", () => { markDirty(); refreshSummaries(); refreshMarks(); }); form.addEventListener("change", () => { markDirty(); refreshSummaries(); });
+
+  // title placeholder follows the teams
+  const names = () => teams.filter(t => [$("team_a_id").value, $("team_b_id").value].includes(String(t.team_id)))
+    .sort((a, b) => ($("team_a_id").value === String(a.team_id) ? -1 : 1)).map(t => t.name).join(" vs ");
+  const upd = () => { $("title").placeholder = names() || "Team A vs Team B"; };
+  $("team_a_id").onchange = () => { upd(); refreshSummaries(); }; $("team_b_id").onchange = () => { upd(); refreshSummaries(); }; upd();
+
+  // video path checks (one per video field), and the game folder box
+  const VFIELDS = ["edited_video", "source_video"];
+  const vt = {};
+  const checkVideo = async f => {
+    const p = $(f).value.trim(); const el = $("check-" + f);
+    if (!p) {
+      const ai = autoInfo(f);
+      videoFound[f] = null;
+      el.innerHTML = ai && ai.path ? (ai.exists ? `<span style="color:var(--ok)">Found automatically: ${esc(ai.shown)}</span>` : `<span style="color:var(--warn)">Not found: ${esc(ai.shown)}</span>`)
+        : `<span>Not set${g.folder && g.folder.exists ? "" : " (a game folder is needed for it to be found automatically)"}</span>`;
+      refreshSummaries(); return;
+    }
+    const r = await api("GET", "/api/check-video?path=" + encodeURIComponent(p));
+    if ($(f) === null || $(f).value.trim() !== p) return;
+    videoFound[f] = r.exists;
+    const ai = autoInfo(f);
+    el.innerHTML = r.exists ? `<span style="color:var(--ok)">File found</span>`
+      : `<span style="color:var(--warn)">File not found at ${esc(r.resolved)}</span>` + (ai && ai.typed_missing && ai.typed_missing === p ? ` - using the file in the game folder instead: ${esc(ai.shown)}` : "");
+    if (!r.exists && ai && ai.typed_missing === p) videoFound[f] = true;
+    refreshSummaries();
+  };
+  VFIELDS.forEach(f => {
+    $(f).addEventListener("input", () => {
+      clearTimeout(vt[f]); vt[f] = setTimeout(() => checkVideo(f), 400);
+      const hint = $("pv-hint");
+      if (hint) { const changed = VFIELDS.some(k => $(k).value.trim() !== (g[k] || "")); hint.hidden = !changed; hint.textContent = "Save to preview the newly chosen video."; }
+    });
+    checkVideo(f);
+  });
+  document.querySelectorAll("[data-browse]").forEach(b => { b.onclick = () => openPicker($(b.dataset.browse), b.dataset.title, isNew ? {} : { game: g.game_id }); });
+
+  const renderFolderBox = () => {
+    const box = $("folder-box"); if (!box) return;
+    const root = g.data_root || {}, fo = g.folder || {};
+    let html;
+    if (isNew) html = `<span class="muted">Save the game first, then its folder can be made.</span>`;
+    else if (!root.set) html = `<span style="color:var(--warn)">No data folder is set.</span> <button type="button" class="primary" id="root-choose">Choose data folder...</button> <span class="small muted">where all your games are kept, e.g. /Volumes/LaCie/walking-football (also on the <a href="#/settings">Settings page</a>)</span>`;
+    else if (!root.exists) html = `<span style="color:var(--warn)">The data folder is not connected:</span> <code>${esc(root.path)}</code>. Connect the drive and reload this page, or <button type="button" id="root-choose">choose another folder</button>.`;
+    else if (fo.exists) html = `<b>Game folder:</b> <code>${esc(fo.shown)}</code> <button type="button" id="folder-open">Open in Finder</button>`;
+    else html = `<b>No folder for this game yet.</b> <button type="button" class="primary" id="folder-make">Create game folder</button> <span class="small muted">(makes videos, data and reports folders inside <code>${esc(root.path)}/games</code>)</span>`;
+    box.innerHTML = html;
+    const open = $("folder-open"), make = $("folder-make"), choose = $("root-choose");
+    if (choose) choose.onclick = () => {
+      const tmp = document.createElement("input"); tmp.value = (root.path || "/Volumes/LaCie/walking-football");
+      tmp.addEventListener("input", async () => {
+        try {
+          META = await api("PUT", "/api/settings", { data_root: tmp.value });
+          const fresh = await api("GET", `/api/games/${g.game_id}`);
+          g.folder = fresh.folder; g.videos = fresh.videos; g.data_root = fresh.data_root;
+          toast("Data folder saved: " + tmp.value);
+          renderFolderBox(); VFIELDS.forEach(checkVideo);
+        } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+      });
+      openPicker(tmp, "Choose the data folder (the one that holds your games)", { folder: true });
+    };
+    if (open) open.onclick = async () => { try { await api("POST", `/api/games/${g.game_id}/folder/open`); } catch (e) { toast((e.errors || [e.message]).join(" "), true); } };
+    if (make) make.onclick = async () => {
+      try {
+        const r = await api("POST", `/api/games/${g.game_id}/folder`);
+        const fresh = await api("GET", `/api/games/${g.game_id}`);
+        g.folder = fresh.folder; g.videos = fresh.videos; g.data_root = fresh.data_root;
+        toast("Folder made: " + r.shown + " - put the videos in its videos folder");
+        renderFolderBox(); VFIELDS.forEach(checkVideo);
+      } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+    };
+  };
+  renderFolderBox();
+
+  // exclusions
+  $("ex-add").onclick = () => { $("ex-rows").insertAdjacentHTML("beforeend", exclusionRow()); markDirty(); refreshSummaries(); };
+  $("ex-rows").addEventListener("click", e => { if (e.target.classList.contains("ex-del")) { e.target.closest("tr").remove(); markDirty(); refreshSummaries(); } });
+
+  const collect = () => {
+    const d = {};
+    ["game_id", "date", "game_type", "game_format", "title", "description", "notes", "team_a_id", "team_b_id", "score_a", "score_b",
+      "source_video", "output_video", "edited_video", "youtube_360_video", "running_speed_km_h", "game_start", "half_time_start", "half_time_end", "game_end"]
+      .forEach(k => { const el = $(k); if (el) d[k] = el.value; });
+    d.exclusions = [...document.querySelectorAll("#ex-rows tr")].map(tr => ({
+      start: tr.querySelector(".ex-start").value, end: tr.querySelector(".ex-end").value, reason: tr.querySelector(".ex-reason").value }));
+    return d;
+  };
+
+  const player = isNew ? null : setupPlayer(id, $, { markDirty, refreshSummaries, refreshMarks, val, fmt: fmtT });
+
+  form.onsubmit = async e => {
+    e.preventDefault();
+    $("save").disabled = true;
+    try {
+      const r = await api(isNew ? "POST" : "PUT", isNew ? "/api/games" : `/api/games/${id}`, collect());
+      dirty = false;
+      if (isNew) { sessionStorageSet("flash", JSON.stringify({ warnings: r.warnings })); location.hash = "#/game/" + r.game.game_id; return; }
+      toast("Saved");
+      if (player) rememberedPlayer = player.state();
+      await gamePage(id);
+      if (r.warnings.length) $("msgs").innerHTML = notice("warn", "Saved, but check:", r.warnings);
+    } catch (err) {
+      $("msgs").innerHTML = notice("bad", "Not saved - please fix:", err.errors); window.scrollTo(0, 0);
+    } finally { const b = $("save"); if (b) b.disabled = false; }
+  };
+
+  refreshSummaries(); refreshMarks();
+  if (isNew) return;
+
+  const flash = sessionStorageGet("flash");
+  if (flash) { sessionStorageSet("flash", ""); const f = JSON.parse(flash);
+    $("msgs").innerHTML = notice("ok", "Game created.", []) + (f.warnings && f.warnings.length ? notice("warn", "Check:", f.warnings) : ""); }
+
+  $("dup").onclick = async () => { const n = await api("POST", `/api/games/${id}/duplicate`); toast(`Created game ${n.game_id}`); location.hash = "#/game/" + n.game_id; };
+  $("arch").onclick = async () => { await api("POST", `/api/games/${id}/archive`, { archived: !g.archived }); toast(g.archived ? "Unarchived" : "Archived"); dirty = false; gamePage(id); };
+  $("del").onclick = async () => {
+    if (!confirm(`Delete game ${id} "${g.title}" and its calibrations? (A backup of the database is made first.)\n\nTo just hide it, use Archive instead.`)) return;
+    await api("DELETE", `/api/games/${id}`); dirty = false; toast("Deleted"); location.hash = "#/";
+  };
+  const loadRecord = async () => { $("rec").textContent = JSON.stringify(await api("GET", `/api/games/${id}/record`), null, 2).replace(/\\n/g, "\n"); };
+  $("rec-details").addEventListener("toggle", () => { if ($("rec-details").open) loadRecord(); });
+  if ($("rec-details").open) loadRecord();
+  renderCalibrations(g);
+  if (!isNew) setupRunPanel(g);
+}
+
+// ---------------------------------------------------------------------------------------------- run panel + console
+
+const RUN_STEPS = [
+  ["detections", "Detections", "find players, goalkeepers and the ball in every frame (the long one)"],
+  ["transformations", "Transformations and statistics", "overhead positions, teams, tracks, speed, distance, possession"],
+  ["detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"],
+  ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
+  ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
+  ["player_positions", "Player positions", "saves the named players' positions (your Identity tags resolved with fixed rules) as NNNN_players.db in the game's data folder, with quality checks and a list of tags that disagree; run it after tagging; agents and analysts read this file"],
+  ["player_report", "Player report", "PDF: distance, max speed and pitch dots coloured by possession — pick one named player or a whole team"],
+  ["annotation", "Annotated video", "the video with detections drawn on it"],
+  ["team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"],
+  ["goal_detection", "Goal detection", "finds the restarts from the centre spot (a goal is followed by one) from the player and ball positions, says which end the ball went to and compares the count with the score; a CSV and a sheet of stills to check by eye (version 0)"],
+  ["youtube_description", "YouTube description", "a .txt to paste into the YouTube description box: teams, date, the game's description, the start / half-time / end times and the goal estimates (build-up, goal, restart) as click-able time stamps; uses the Goal detection result (runs it first if there is none)"],
+  ["ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, at the pitch edge, big and close to the camera, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"],
+  ["broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"],
+];
+// how the stages are grouped on the Run panel (the order inside the pipeline is fixed by the server, see runner.STEPS)
+const RUN_GROUPS = [
+  ["A. Find the players and the goals", "start here: the long stage, then the calculations on its results", ["detections", "transformations", "goal_detection"]],
+  ["B. Check the detections", "how well did the detector do, and what to fix first", ["detection_report"]],
+  ["C. Team reports", "need Transformations", ["match_report", "opposition_report"]],
+  ["D. Named players", "name the players on Track Players first; Player positions is saved before the Player report reads it", ["player_positions", "player_report"]],
+  ["E. Video and description", "need Transformations; the YouTube description uses the Goal detection result in part A", ["annotation", "youtube_description"]],
+  ["F. Training images", "for retraining the models in Roboflow", ["team_images", "ball_images", "broadcast_pitch_images"]],
+];
+let runTimer = null;
+
+function setupRunPanel(g) {
+  const $ = id => document.getElementById(id);
+  clearInterval(runTimer);
+  const loadReports = async () => {
+    const box = $("rep-list"); if (!box) return;
+    try {
+      const rows = await api("GET", `/api/games/${g.game_id}/reports`);
+      box.innerHTML = rows.length ? rows.map(r => `<div class="rep-row"><a href="/api/games/${g.game_id}/reports/file?name=${encodeURIComponent(r.name)}&test=${r.test}" target="_blank" rel="noopener">${esc(r.name)}</a>${r.test ? ' <span class="chip">test</span>' : ""}
+        <span class="muted">${esc(r.when)} &middot; ${fmtSize(r.size)}</span></div>`).join("") : '<span class="muted">None yet.</span>';
+    } catch (e) { box.innerHTML = '<span class="muted">Not available (is the data folder connected?).</span>'; }
+  };
+  loadReports();
+  let stepState = {}, tagCount = 0;
+  const STEP_LABEL = { done: "Done", stale: "Out of date", interrupted: "Interrupted", running: "Running", not_run: "Not run" };
+  const loadStepState = async () => {
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/run-status`);
+      stepState = r.steps || {}; tagCount = r.tags || 0;
+    } catch (e) { return; }
+    document.querySelectorAll("[data-chip]").forEach(chip => {
+      const st = stepState[chip.dataset.chip];
+      if (!st || st.state === "unknown") { chip.hidden = true; return; }
+      const cls = { done: "ok", stale: "warn", interrupted: "bad", running: "info", not_run: "" }[st.state] || "";
+      chip.className = "chip " + cls;
+      chip.textContent = (STEP_LABEL[st.state] || st.state) + (st.state === "done" && st.at ? " " + st.at.slice(5, 16) : "");
+      chip.title = (st.reasons || []).join("; ") || (st.state === "not_run" ? "Not run yet for this game" : "");
+      chip.hidden = st.state === "not_run" && !["detections", "transformations", "player_positions"].includes(chip.dataset.chip);
+    });
+    syncAutoTicks();
+  };
+  // a named Player report needs current Player positions: tick it for the person (the server also adds it if forgotten)
+  const syncAutoTicks = () => {
+    const rep = document.querySelector('[data-step="player_report"]'), pos = document.querySelector('[data-step="player_positions"]');
+    if (!rep || !pos || !rep.checked || pos.checked || pos.disabled) return;
+    const tgt = ($("run-player-report") && $("run-player-report").value) || "named";
+    const named = tgt === "named" || tgt.startsWith("roster:");
+    const ps = stepState.player_positions;
+    if (named && tagCount > 0 && ps && ps.state !== "done") { pos.checked = true; toast("Player positions ticked: the Player report reads it and it is " + (ps.state === "stale" ? "out of date" : "not built yet")); }
+  };
+  document.addEventListener("change", e => { if (e.target && e.target.dataset && e.target.dataset.step === "player_report") syncAutoTicks(); });
+  loadStepState();
+  document.addEventListener("gl-run-finished", loadStepState);
+  if (window.glRepDone) document.removeEventListener("gl-run-finished", window.glRepDone);
+  window.glRepDone = loadReports;
+  document.addEventListener("gl-run-finished", window.glRepDone);
+  let offset = 0, lines = [], cur = "", overwrite = false, shownRun = null, mode = "current", lastStatus = null, busy = false;
+
+  const feed = text => {
+    for (const ch of text) {
+      if (ch === "\n") { lines.push(cur); cur = ""; overwrite = false; }
+      else if (ch === "\r") overwrite = true;
+      else { if (overwrite) { cur = ""; overwrite = false; } cur += ch; }
+    }
+    if (lines.length > 4000) lines.splice(0, lines.length - 4000);
+  };
+  const paint = () => {
+    const pre = $("run-console"); if (!pre) return;
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    pre.textContent = lines.join("\n") + (cur ? "\n" + cur : "");
+    if ($("run-follow").checked && (atBottom || mode === "old")) pre.scrollTop = pre.scrollHeight;
+    // progress: the last "NN%" a progress bar printed, and the latest line
+    const recent = lines.slice(-40).concat([cur]);
+    let pct = null, last = "";
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const t = recent[i].trim();
+      if (!last && t) last = t;
+      if (pct === null) { const m = /(\d{1,3})%\|/.exec(t); if (m) pct = Math.min(100, +m[1]); }
+      if (last && pct !== null) break;
+    }
+    $("run-line").textContent = last.length > 200 ? last.slice(0, 200) + "..." : last;
+    $("run-bar").hidden = pct === null || mode !== "current";
+    if (pct !== null) $("run-bar-fill").style.width = pct + "%";
+    return pct;
+  };
+  const reset = () => { lines = []; cur = ""; overwrite = false; offset = 0; };
+  const parseStart = s => { const d = new Date((s || "").replace(" ", "T")); return isNaN(d) ? null : d; };
+  const elapsed = r => {
+    const a = parseStart(r.started), b = r.ended ? parseStart(r.ended) : new Date();
+    if (!a || !b) return ""; const t = Math.max(0, Math.round((b - a) / 1000));
+    return `${String(Math.floor(t / 3600)).padStart(2, "0")}:${String(Math.floor(t / 60) % 60).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+  };
+  const stepNames = r => (r.steps || []).map(k => (RUN_STEPS.find(x => x[0] === k) || [k, k])[1]).join(", ");
+
+  const syncAnnotateBg = () => {
+    const sel = $("run-annotate-bg"), row = $("run-annotate-bg-row");
+    const pitch = $("run-edited-pitch"), pitchRow = $("run-edited-pitch-row");
+    if (!sel) return;
+    const annOn = !!document.querySelector('[data-step="annotation"]:checked');
+    sel.disabled = !annOn;
+    if (row) row.style.opacity = annOn ? "" : "0.55";
+    const editedOpt = sel.querySelector('option[value="edited"]');
+    if (editedOpt && editedOpt.disabled && sel.value === "edited") sel.value = "analysis";
+    const pitchOn = annOn && sel.value === "edited";
+    if (pitch) pitch.disabled = !pitchOn;
+    if (pitchRow) pitchRow.style.opacity = pitchOn ? "" : "0.55";
+  };
+  const syncPlayerReport = () => {
+    const sel = $("run-player-report"), row = $("run-player-report-row");
+    if (!sel) return;
+    const on = !!document.querySelector('[data-step="player_report"]:checked');
+    sel.disabled = !on;
+    if (row) row.style.opacity = on ? "" : "0.55";
+  };
+  document.querySelectorAll("[data-step]").forEach(el => el.addEventListener("change", () => { syncAnnotateBg(); syncPlayerReport(); }));
+  const _bgSel = $("run-annotate-bg");
+  if (_bgSel) _bgSel.addEventListener("change", syncAnnotateBg);
+  syncAnnotateBg();
+  syncPlayerReport();
+  (async () => {
+    const sel = $("run-player-report");
+    if (!sel) return;
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/player-report/targets`);
+      const saved = sel.dataset.saved || "";
+      const opts = (r.targets || []).map(t =>
+        `<option value="${esc(t.id)}" ${t.id === saved ? "selected" : ""}>${esc(t.label)}</option>`).join("");
+      sel.innerHTML = opts || `<option value="named">All named players</option>`;
+      if (saved && ![...sel.options].some(o => o.value === saved) && sel.options.length) sel.selectedIndex = 0;
+    } catch (e) {
+      sel.innerHTML = `<option value="team:${esc(g.team_a || "")}">Whole team · ${esc(g.team_a || "A")}</option>`
+        + (g.team_b ? `<option value="team:${esc(g.team_b)}">Whole team · ${esc(g.team_b)}</option>` : "");
+    }
+    syncPlayerReport();
+  })();
+
+  const showStatus = (r, pct) => {
+    const mine = r && r.game_id === g.game_id, running = r && r.status === "running";
+    $("run-go").disabled = !!running;
+    $("run-stop").disabled = !(running && mine);
+    document.querySelectorAll("[data-step], #run-test, #run-mins, #run-annotate-bg, #run-edited-pitch, #run-player-report").forEach(el => { el.disabled = !!running; });
+    if (!running) { syncAnnotateBg(); syncPlayerReport(); }
+    let txt = "", sum = "detections, reports and the annotated video";
+    if (r) {
+      const who = mine ? "" : `game ${r.game_id}: `;
+      if (running) { txt = `<b style="color:var(--ok)">Running</b> ${who}${esc(stepNames(r))}${r.test ? " (test run)" : ""} - ${elapsed(r)}`; sum = `Running${pct != null ? " " + Math.round(pct) + "%" : ""} - ${elapsed(r)}`; }
+      else {
+        const cls = r.status === "finished" ? "var(--ok)" : "var(--bad)";
+        txt = `<b style="color:${cls}">${esc(r.status[0].toUpperCase() + r.status.slice(1))}</b> ${who}${esc(stepNames(r))}${r.test ? " (test run)" : ""} - took ${elapsed(r)}`;
+        sum = mine ? `Last run: ${r.status} ${r.ended || ""}` : sum;
+      }
+      if (!mine) txt += ` <a href="#/game/${r.game_id}">open game ${r.game_id}</a>`;
+    }
+    $("run-status").innerHTML = txt; $("sum-run").textContent = sum;
+  };
+
+  const pollOnce = async () => {
+    if (!$("run-console")) { clearInterval(runTimer); return; }
+    if (busy || mode !== "current") return;
+    busy = true;
+    try {
+      const st = (await api("GET", "/api/run")).run;
+      if (location.hash !== "#/game/" + g.game_id) return;
+      const mine = st && st.game_id === g.game_id;
+      if (mine) {
+        if (shownRun !== st.id) { reset(); shownRun = st.id; }
+        const first = offset === 0 && lines.length === 0;
+        const r = await api("GET", `/api/run/log?offset=${offset}${first ? "&tail=true" : ""}`);
+        if (r.run && r.run.id === st.id) { offset = r.offset; if (r.text) feed(r.text); }
+      }
+      const pct = paint();
+      showStatus(st, pct);
+      if (lastStatus === "running" && st && st.status !== "running") {
+        toast(st.status === "finished" ? "Run finished" : "Run " + st.status, st.status !== "finished");
+        document.dispatchEvent(new Event("gl-run-finished"));
+        loadPast();
+      }
+      lastStatus = st ? st.status : null;
+    } catch (e) { /* the app may be restarting; try again next time */ } finally { busy = false; }
+  };
+
+  const loadPast = async () => {
+    try {
+      const runs = await api("GET", `/api/games/${g.game_id}/runs`);
+      $("run-past").innerHTML = `<option value="">Earlier runs...</option>` + runs.map(r =>
+        `<option value="${esc(r.id)}">${esc(r.started)}  ${r.test ? "[test] " : ""}${esc((r.steps || []).join(", "))}  - ${esc(r.status)}</option>`).join("");
+    } catch (e) { /* ignore */ }
+  };
+
+  $("run-go").onclick = async () => {
+    $("run-msg").innerHTML = "";
+    const steps = [...document.querySelectorAll("[data-step]:checked")].map(el => el.dataset.step);
+    try { localStorage.setItem("gl-run-steps", JSON.stringify(steps)); } catch (e) { /* ignore */ }
+    const body = { steps };
+    if ($("run-allow-stale") && $("run-allow-stale").checked) body.allow_stale = true;
+    if ($("run-test").checked) body.duration_s = Math.max(1, Math.round(parseFloat($("run-mins").value || "2") * 60));
+    if (steps.includes("annotation")) {
+      const bg = ($("run-annotate-bg") && $("run-annotate-bg").value) || "analysis";
+      const pitch = !!(bg === "edited" && $("run-edited-pitch") && $("run-edited-pitch").checked);
+      body.annotate_background = bg;
+      body.annotate_edited_pitch = pitch;
+      try { localStorage.setItem("gl-annotate-bg", bg); } catch (e) { /* ignore */ }
+      try { localStorage.setItem("gl-annotate-edited-pitch", pitch ? "1" : "0"); } catch (e) { /* ignore */ }
+    }
+    if (steps.includes("player_report")) {
+      const tgt = ($("run-player-report") && $("run-player-report").value) || "named";
+      body.player_report_target = tgt;
+      try { localStorage.setItem("gl-player-report-target", tgt); } catch (e) { /* ignore */ }
+    }
+    try {
+      const r = await api("POST", `/api/games/${g.game_id}/run`, body);
+      mode = "current"; $("run-back").hidden = true; reset(); shownRun = r.run.id; lastStatus = "running";
+      if ($("run-stale-row")) { $("run-stale-row").hidden = true; $("run-allow-stale").checked = false; }
+      (r.run.notes || []).forEach(n => toast(n));
+      setTimeout(loadStepState, 3000);
+      $("run-console").textContent = "Starting..."; $("run-card").open = true;
+      pollOnce();
+    } catch (e) {
+      const errs = e.errors || [e.message];
+      $("run-msg").innerHTML = notice("bad", "Not started:", errs);
+      $("run-card").open = true;
+      if ($("run-stale-row") && errs.some(x => /out of date/.test(x))) $("run-stale-row").hidden = false;
+      loadStepState();
+    }
+  };
+  $("run-stop").onclick = async () => {
+    if (!confirm("Stop the run? Whatever the current stage has not finished will be lost; stages that completed are kept.")) return;
+    try { await api("POST", "/api/run/stop"); toast("Stopping..."); pollOnce(); } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+  $("run-past-view").onclick = async () => {
+    const id = $("run-past").value; if (!id) return;
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/runs/${encodeURIComponent(id)}/log?tail=true`);
+      mode = "old"; reset(); feed(r.text); paint(); $("run-back").hidden = false;
+      $("run-line").textContent = "Showing the end of an earlier run's log.";
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+  $("run-back").onclick = () => { mode = "current"; $("run-back").hidden = true; reset(); shownRun = null; $("run-console").textContent = ""; pollOnce(); };
+
+  // full window view of the run output (inside the browser window, not the screen's full screen); Esc or the button goes back
+  const maxView = on => {
+    const v = $("run-view"); if (!v) return;
+    v.classList.toggle("max", on); document.body.classList.toggle("run-max-open", on);
+    const pre = $("run-console"); if (on || $("run-follow").checked) pre.scrollTop = pre.scrollHeight;
+  };
+  $("run-max").onclick = () => { $("run-card").open = true; secSave("run", true); maxView(true); };
+  $("run-max-close").onclick = () => maxView(false);
+  $("run-stop2").onclick = () => $("run-stop").click();
+  new MutationObserver(() => { const b = $("run-stop2"); if (b) b.disabled = $("run-stop").disabled; })
+    .observe($("run-stop"), { attributes: true, attributeFilter: ["disabled"] });
+  $("run-stop2").disabled = $("run-stop").disabled;
+  const escMax = e => {
+    if (!$("run-view")) { document.removeEventListener("keydown", escMax); document.body.classList.remove("run-max-open"); return; }
+    if (e.key === "Escape" && $("run-view").classList.contains("max")) maxView(false);
+  };
+  document.addEventListener("keydown", escMax);
+
+  loadPast(); pollOnce();
+  runTimer = setInterval(pollOnce, 1500);
+}
+
+// ---------------------------------------------------------------------------------------------- video player
+
+function setupPlayer(id, $, ctx) {
+  const pv = $("pv"), msg = $("pv-msg"), vsel = $("vsel");
+  let items = [], ffmpeg = false, poll = null, pendingSeek = null;
+  const key = () => vsel.value;
+  const cur = () => items.find(i => i.key === key()) || null;
+  const proxy = () => (cur() && cur().proxy) || {};
+  const isAnalysis = () => key() === "analysis";
+  const useProxy = () => $("pv-proxy").checked && !!proxy().exists;
+  const say = (html, kind) => { msg.hidden = !html; msg.className = "pv-msg" + (kind ? " " + kind : ""); msg.innerHTML = html || ""; };
+  const pkey = () => "gl-proxy-" + id + "-" + key();
+  const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } };
+  const note = document.createElement("div"); note.className = "small"; note.style.cssText = "color:#f0b955;margin:2px 0 8px"; note.hidden = true;
+  $("pv-marks").before(note);
+
+  const load = (seek) => {
+    if (!key()) return;
+    pendingSeek = seek || 0;
+    say("");
+    pv.src = `/api/games/${id}/video?key=${encodeURIComponent(key())}` + (useProxy() ? "&proxy=1" : "");
+    pv.playbackRate = parseFloat($("pv-speed").value);
+    $("pv-marks").classList.toggle("off", !isAnalysis());
+    note.hidden = isAnalysis();
+    note.textContent = "Game times are measured on the Analysis video, so the Set here buttons only work while that one is selected.";
+  };
+  pv.addEventListener("loadedmetadata", () => {
+    $("pv-dur").textContent = fmtT(pv.duration);
+    if (pendingSeek) { pv.currentTime = Math.min(pendingSeek, pv.duration || pendingSeek); pendingSeek = null; }
+  });
+  pv.addEventListener("timeupdate", () => { $("pv-cur").textContent = fmtT(pv.currentTime); });
+  pv.addEventListener("error", () => {
+    if (!pv.getAttribute("src")) return;
+    if (!useProxy() && proxy().exists) { $("pv-proxy").checked = true; lsSet(pkey(), "1"); load(pv.currentTime); return; }
+    if (useProxy()) { say("This browser could not play the preview copy either. Try another browser (Chrome or Safari), or untick \"lighter preview copy\" to try the original.", "bad"); return; }
+    say(esc(`Your browser could not play this video (often because it is HEVC/H.265). `) +
+      (ffmpeg ? `<button type="button" id="pv-make">Make a lighter preview copy</button> <span>(one-off, takes a few minutes)</span>` : "Install ffmpeg to be able to make a preview copy that plays."), "bad");
+    const b = $("pv-make"); if (b) b.onclick = startProxy;
+  });
+
+  const showProxyUi = () => {
+    const p = proxy(), c = cur();
+    $("pv-proxy-wrap").style.display = p.exists ? "flex" : "none";
+    $("pv-proxy").checked = !!p.exists && lsGet(pkey()) === "1";
+    const area = $("pv-proxy-area");
+    if (p.state === "running") area.innerHTML = `Making the preview copy${p.pct != null ? ` ${Math.round(p.pct)}%` : "..."}`;
+    else if (p.state === "error") area.innerHTML = `<span style="color:#ff9d90">Preview copy failed: ${esc(p.error || "")}</span>`;
+    else if (!p.exists && ffmpeg && c && c.exists) area.innerHTML = `<button type="button" class="link" id="pv-make2">Make a lighter preview copy</button>`;
+    else area.innerHTML = "";
+    const b = $("pv-make2"); if (b) b.onclick = startProxy;
+  };
+  const refreshList = async () => {
+    const r = await api("GET", `/api/games/${id}/videos`);
+    items = r.items; ffmpeg = r.ffmpeg;
+    return r;
+  };
+  async function startProxy() {
+    const k = key();
+    try { await api("POST", `/api/games/${id}/preview-copy?key=${encodeURIComponent(k)}`); } catch (e) { say(esc((e.errors || [e.message]).join(" ")), "bad"); return; }
+    say("Making the preview copy - you can keep working; it will switch over when ready.");
+    waitForProxy(k);
+  }
+  function waitForProxy(k) {
+    clearInterval(poll);
+    poll = setInterval(async () => {
+      if (!document.getElementById("pv")) { clearInterval(poll); return; }
+      await refreshList();
+      if (key() !== k) { clearInterval(poll); return; }
+      showProxyUi();
+      const p = proxy();
+      if (p.exists) { clearInterval(poll); lsSet(pkey(), "1"); say(""); showProxyUi(); load(pv.currentTime); }
+      else if (p.state === "error") { clearInterval(poll); say("Could not make the preview copy: " + esc(p.error || ""), "bad"); }
+    }, 2000);
+  }
+
+  vsel.addEventListener("change", () => { clearInterval(poll); showProxyUi(); load(0); if (proxy().state === "running") waitForProxy(key()); });
+  $("pv-proxy").addEventListener("change", () => { lsSet(pkey(), $("pv-proxy").checked ? "1" : "0"); load(pv.currentTime); });
+  $("pv-speed").addEventListener("change", () => { pv.playbackRate = parseFloat($("pv-speed").value); });
+  document.querySelectorAll("[data-skip]").forEach(b => b.onclick = () => {
+    const d = parseFloat(b.dataset.skip); if (Math.abs(d) < 1) pv.pause();
+    pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, pv.currentTime + d));
+  });
+  document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => { const t = parseT(ctx.val(b.dataset.go)); if (t !== null) pv.currentTime = t; });
+  document.querySelectorAll("[data-set]").forEach(b => b.onclick = () => {
+    if (!isAnalysis()) { toast("Switch to the Analysis video to set game times"); return; }
+    const el = $(b.dataset.set); el.value = fmtT(pv.currentTime); el.dispatchEvent(new Event("input", { bubbles: true }));
+    toast(`${el.previousElementSibling ? el.previousElementSibling.textContent : "Time"} set to ${el.value} - remember to Save`);
+  });
+  document.querySelectorAll("[data-ex]").forEach(b => b.onclick = () => {
+    if (!isAnalysis()) { toast("Switch to the Analysis video to set game times"); return; }
+    const rows = $("ex-rows"), t = fmtT(pv.currentTime);
+    if (b.dataset.ex === "start") { rows.insertAdjacentHTML("beforeend", exclusionRow({ start: t })); toast(`Exclusion starts at ${t} - now find where it ends and press End here`); }
+    else {
+      const last = rows.lastElementChild;
+      if (!last) { toast("Press Start here first"); return; }
+      last.querySelector(".ex-end").value = t; toast(`Exclusion ends at ${t}`);
+    }
+    ctx.markDirty(); ctx.refreshSummaries();
+  });
+
+  if (keyHandler) document.removeEventListener("keydown", keyHandler);
+  keyHandler = e => {
+    const p = document.getElementById("pv"); if (!p) return;
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || document.activeElement === p || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === " ") { e.preventDefault(); p.paused ? p.play() : p.pause(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); p.currentTime -= e.shiftKey ? 30 : 5; }
+    else if (e.key === "ArrowRight") { e.preventDefault(); p.currentTime += e.shiftKey ? 30 : 5; }
+    else if (e.key === ",") { p.pause(); p.currentTime -= 0.0417; }
+    else if (e.key === ".") { p.pause(); p.currentTime += 0.0417; }
+  };
+  document.addEventListener("keydown", keyHandler);
+
+  function fillOptions() {
+    const keep = vsel.value;
+    vsel.innerHTML = items.map(i => `<option value="${esc(i.key)}" ${i.exists ? "" : "disabled"}>${esc(i.label)}${i.exists || /(not set|none yet)$/.test(i.label) ? "" : " (file not found)"}</option>`).join("");
+    if (keep && items.some(i => i.key === keep && i.exists)) vsel.value = keep;
+  }
+  if (window.glRunDone) document.removeEventListener("gl-run-finished", window.glRunDone);
+  window.glRunDone = async () => { if (!document.getElementById("pv")) return; try { await refreshList(); fillOptions(); showProxyUi(); } catch (e) { /* ignore */ } };
+  document.addEventListener("gl-run-finished", window.glRunDone);
+
+  (async () => {
+    await refreshList();
+    fillOptions();
+    const first = items.find(i => i.key === "analysis" && i.exists) || items.find(i => i.exists);
+    if (!first) { say("No video to show yet. Choose the videos under Video files and save."); return; }
+    vsel.value = first.key;
+    const rp = rememberedPlayer && rememberedPlayer.id === id ? rememberedPlayer : null; rememberedPlayer = null;
+    if (rp && items.some(i => i.key === rp.key && i.exists)) vsel.value = rp.key;
+    showProxyUi();
+    if (proxy().state === "running") waitForProxy(key());
+    load(rp && rp.key === vsel.value ? rp.time : 0);
+  })();
+
+  return { state: () => ({ id, key: key(), time: pv.currentTime }) };
+}
+
+function sessionStorageGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+
+function renderCalibrations(g) {
+  const body = document.getElementById("cal-body");
+  const active = (g.calibrations || []).find(c => c.is_active);
+  const pts = active ? META.point_names.map(n => `<div><b>${esc(n.replace("_", " "))}</b>${active.vertices[n] ? active.vertices[n].join(", ") : "-"}</div>`).join("") : "";
+  document.getElementById("sum-cal").innerHTML = active ? esc(`In use: ${active.label || "calibration " + active.id}  ·  ${active.created_at}`) : `<span style="color:var(--warn)">No calibration yet</span>`;
+  document.getElementById("sum-act").textContent = active ? "Re-calibrate pitch" : "Calibrate pitch";
+  body.innerHTML = `
+    ${active ? `<p class="muted small" style="margin:12px 0 8px">In use: ${esc(active.label || "calibration " + active.id)} &middot; ${esc(active.created_at)} &middot; from ${esc(active.source)} &middot; ${active.has_goal_posts ? "goal posts included" : "no goal posts"} &middot; ${active.has_calibrator_json ? "full calibrator data" : "outline only (older style; the pipeline uses the simple pitch transform)"}</p><div class="pts">${pts}</div>`
+      : `<p class="notice warn" style="margin-top:12px">No calibration yet. Click Calibrate pitch (or paste calibrator JSON below).</p>`}
+    <h2 style="margin-top:18px">Or paste a calibration</h2>
+    <label>Paste the JSON exported by the Pitch Calibrator</label>
+    <textarea id="cal-json" class="code" placeholder='{ "source_frame": "...", "pitch_vertices": { ... } }'></textarea>
+    <div class="row" style="margin-top:8px"><input id="cal-label" placeholder="Label (optional, e.g. 'second try with netting edge')" style="flex:1;min-width:220px">
+      <button class="primary" id="cal-add" type="button">Add and use</button></div>
+    <div id="cal-msg" style="margin-top:10px"></div>
+    ${(g.calibrations || []).length ? `<h2 style="margin-top:18px">History <span class="muted small">newest first; the pipeline uses the one marked "in use"</span></h2>` +
+      g.calibrations.map(c => `<div class="cal"><span>${c.is_active ? `<span class="chip ok">In use</span>` : ""}</span>
+        <span style="flex:1;min-width:200px"><b>${esc(c.label || "Calibration " + c.id)}</b> <span class="muted small">${esc(c.created_at)} &middot; ${esc(c.source)}${c.has_goal_posts ? " &middot; goal posts" : ""}</span></span>
+        ${c.is_active ? "" : `<button class="link" data-use="${c.id}" type="button">Use this one</button>`}
+        ${c.has_calibrator_json ? `<a class="btn" href="/api/calibrations/${c.id}/download">Download JSON</a>` : ""}
+        <button class="link danger" data-del="${c.id}" type="button">Delete</button></div>`).join("") : ""}`;
+  const $ = id => document.getElementById(id);
+  $("cal-add").onclick = async () => {
+    try {
+      const r = await api("POST", `/api/games/${g.game_id}/calibrations`, { json: $("cal-json").value, label: $("cal-label").value, make_active: true });
+      toast("Calibration added"); renderCalibrations(r.game);
+    } catch (e) { $("cal-msg").innerHTML = notice("bad", "Could not add it:", e.errors); }
+  };
+  body.querySelectorAll("[data-use]").forEach(b => b.onclick = async () => { renderCalibrations(await api("POST", `/api/games/${g.game_id}/calibrations/${b.dataset.use}/activate`)); toast("Calibration switched"); });
+  body.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm("Delete this calibration?")) return;
+    renderCalibrations(await api("DELETE", `/api/games/${g.game_id}/calibrations/${b.dataset.del}`));
+  });
+}
+
+const squadLabel = s => ({ mens: "Men", womens: "Women", both: "Both" }[s] || s);
+const playerCountLabel = p => {
+  if (!p || !p.total) return '<span class="muted small">None yet</span>';
+  const bits = [];
+  if (p.mens) bits.push(`${p.mens} men`);
+  if (p.womens) bits.push(`${p.womens} women`);
+  if (p.both) bits.push(`${p.both} both`);
+  return esc(bits.join(", "));
+};
+
+// ---------------------------------------------------------------------------------------------- identity (name Polis players on the analysis video)
+
+async function identityPage(gameId) {
+  const data = await api("GET", `/api/games/${gameId}/identity`);
+  if (location.hash !== `#/game/${gameId}/identity`) return;
+
+  const navBack = document.getElementById("nav-back");
+  if (navBack) { navBack.href = `#/game/${gameId}`; navBack.textContent = "← Game " + gameId; }
+  document.getElementById("nav-title").textContent = `Track Players · ${data.title || ("Game " + gameId)}`;
+  document.getElementById("nav-actions").innerHTML = `<button type="button" class="gl-btn" id="id-build" disabled title="Resolve your tags with the fixed rules and save NNNN_players.db in the game's data folder: the file the reports and analysts read. Your tags are already saved; this does not change them.">Export and Build</button> <a class="gl-btn" href="#/game/${gameId}">Back to game</a>`;
+
+  const analysisOk = !!(data.videos && data.videos.analysis && data.videos.analysis.exists);
+  const startT = data.game_start_s != null ? data.game_start_s : 0;
+
+  view.innerHTML = `
+    <div id="id-msgs"></div>
+    ${!data.polis_team_ids.length ? notice("warn", "No Polis team on this game", ["Pick Polis Lions as team A or B on the game page, then come back."]) : ""}
+    ${!data.has_detections ? notice("warn", "Detections needed", [data.detections_error || "Run Detections first."]) : ""}
+    ${!analysisOk ? notice("bad", "No analysis video", ["Add the analysis video on the game page — boxes are in that camera."]) : ""}
+    <div class="id-layout">
+      <section class="id-stage card">
+        <div class="id-video-wrap" id="id-video-wrap">
+          <div class="id-zoom-stage" id="id-zoom-stage">
+            <video id="id-pv" controls preload="metadata" playsinline></video>
+            <canvas id="id-cv"></canvas>
+          </div>
+        </div>
+        <div class="row id-controls">
+          <span class="id-time" id="id-cur">00:00</span>
+          <button type="button" data-iskip="-5">−5s</button>
+          <button type="button" data-iskip="-0.0417" title="One frame">◀ frame</button>
+          <button type="button" id="id-pause">Pause</button>
+          <button type="button" data-iskip="0.0417" title="One frame">frame ▶</button>
+          <button type="button" data-iskip="5">+5s</button>
+          <label class="small" style="margin:0;display:flex;gap:6px;align-items:center">Speed
+            <select id="id-speed" style="width:auto">${[0.5, 1, 2, 4].map(s => `<option value="${s}" ${s === 1 ? "selected" : ""}>${s}×</option>`).join("")}</select>
+          </label>
+          <label class="small id-zoom-ctrl" title="Drag the video to pan when zoomed in. Ctrl/⌘ + scroll also zooms.">
+            Zoom
+            <input type="range" id="id-zoom" min="1" max="3" step="0.05" value="1">
+            <span id="id-zoom-val">100%</span>
+            <button type="button" class="link" id="id-zoom-reset" hidden>Reset</button>
+          </label>
+          <span class="small muted" id="id-frame-meta"></span>
+        </div>
+        <p class="muted small" style="margin:10px 0 0">Click a box to name that track (or right-click for a quick name list). When tracking breaks, click the new box and pick the same person again. Format: <b>${esc(data.game_format || "—")}</b> · roster shows ${esc(data.game_format === "womens" ? "women (+ both)" : data.game_format === "mens" ? "men (+ both)" : "all Polis players")}.</p>
+      </section>
+      <aside class="id-side">
+        <details class="card id-fold" id="id-roles-card" ${secOpen("idroles", true) ? "open" : ""}>
+          <summary><h2 style="margin:0">Positions in this game</h2></summary>
+          <p class="muted small" style="margin:6px 0">Right-click a box on the video to name a player. Positions are recorded for the analysts; nothing uses them yet.</p>
+          <div id="id-roles" class="small muted">Loading…</div>
+        </details>
+        <div id="id-assign-legacy" hidden>
+          <div id="id-pick" class="muted small">Click a detection box on the video.</div>
+          <div id="id-roster-wrap" hidden>
+            <p class="small" style="margin:10px 0 6px"><b id="id-pick-label"></b></p>
+            <input id="id-filter" placeholder="Filter names…" style="margin-bottom:8px">
+            <div id="id-roster" class="id-roster"></div>
+            <button type="button" class="link danger" id="id-clear" style="margin-top:8px" hidden>Clear name on this track</button>
+          </div>
+        </div>
+        <details class="card id-fold id-acc" id="id-asg-fold" ${idAccOpen() === "asg" ? "open" : ""}>
+          <summary><h2 style="margin:0">Player tracking <span class="muted small" id="id-asg-count"></span></h2>
+            <span class="row" style="gap:6px;flex-wrap:nowrap;margin-left:auto" onclick="event.preventDefault()">
+              <button type="button" id="id-prev-break" hidden>Prev break</button>
+              <button type="button" class="primary" id="id-next-break" hidden>Next break</button>
+            </span></summary>
+          <div class="id-acc-body">
+            <p class="muted small" id="id-break-hint" hidden style="margin:6px 0">Jump to where a named track is lost, then click the new box and assign the same person.</p>
+            <div id="id-assignments" class="id-asg-list muted small">None yet.</div>
+          </div>
+        </details>
+        <details class="card id-fold id-acc" id="id-health-card" ${idAccOpen() === "health" ? "open" : ""}>
+          <summary><h2 style="margin:0">Quality</h2><span id="id-health-actions" class="row" style="gap:6px;margin-left:auto" onclick="event.preventDefault()"></span></summary>
+          <div id="id-health" class="small muted id-acc-body" style="margin-top:6px">Checking…</div>
+        </details>
+      </aside>
+    </div>
+    <div id="id-ctx" class="id-ctx" hidden></div>
+    <dialog id="id-dlg"></dialog>`;
+
+  if (!analysisOk || !data.has_detections) return;
+
+  const pv = document.getElementById("id-pv");
+  const cv = document.getElementById("id-cv");
+  const stage = document.getElementById("id-zoom-stage");
+  const wrapEl = document.getElementById("id-video-wrap");
+  const ctx = cv.getContext("2d");
+  let boxes = [];
+  let selectedTrack = null;
+  let assignments = data.assignments || [];
+  let roster = data.roster || [];
+  let breaks = [];
+  let fetchTimer = null;
+  let videoW = 0, videoH = 0;
+  let zoom = 1, panX = 0, panY = 0;
+
+  const breakForRoster = rid => breaks.find(b => b.roster_player_id === rid) || null;
+
+  const jumpToBreak = b => {
+    if (!b) return;
+    closeCtx();
+    pv.pause();
+    pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, b.seek_t));
+    selectedTrack = null;
+    toast(`${b.name}: track #${b.track_player_id} lost @ ${fmtT(b.lost_at_t)} — pick the new box`);
+  };
+
+  const refreshBreaks = async () => {
+    try {
+      const r = await api("GET", `/api/games/${gameId}/identity/breaks`);
+      breaks = r.breaks || [];
+    } catch (e) {
+      breaks = [];
+    }
+    const nextBtn = document.getElementById("id-next-break");
+    const prevBtn = document.getElementById("id-prev-break");
+    const hint = document.getElementById("id-break-hint");
+    const n = breaks.length;
+    if (nextBtn) {
+      nextBtn.hidden = !n;
+      nextBtn.textContent = n ? `Next break (${n})` : "Next break";
+    }
+    if (prevBtn) {
+      prevBtn.hidden = !n;
+      prevBtn.textContent = n ? `Prev break (${n})` : "Prev break";
+    }
+    if (hint) hint.hidden = !n;
+    renderAssignments();
+  };
+
+  // ---- positions played (per half) and formation (per half)
+  let extraRoleIds = [];
+  const refreshRoles = async () => {
+    const box = document.getElementById("id-roles"); if (!box) return;
+    let r;
+    try { r = await api("GET", `/api/games/${gameId}/identity/roles`); }
+    catch (e) { box.textContent = "Positions are not available."; return; }
+    const listed = new Set(r.players.map(p => p.roster_player_id));
+    const rows = r.players.concat(extraRoleIds.filter(id => !listed.has(id)).map(id => {
+      const pl = roster.find(x => x.player_id === id) || {};
+      return { roster_player_id: id, name: pl.name || ("Player " + id), tagged: false, h1: null, h2: null, note1: null, note2: null };
+    }));
+    const sel = (cur, attrs, blank) => `<select ${attrs}><option value="">${blank}</option>${r.positions.map(v => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    const fsel = (cur, half, blank) => `<select data-fm="${half}"><option value="">${blank}</option>${r.formations.map(v => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    const addable = roster.filter(x => !rows.some(p => p.roster_player_id === x.player_id));
+    box.className = "small";
+    box.innerHTML = `
+      <div class="id-roles-grid id-roles-head"><span>Formation</span>${fsel(r.formation["1"], 1, "1st half…")}${fsel(r.formation["2"], 2, "Same as 1st")}</div>
+      ${rows.length ? `<div class="id-roles-grid id-roles-head" style="margin-top:6px"><span class="muted">Player</span><span class="muted">1st half</span><span class="muted">2nd half</span></div>` : `<span class="muted">Name a player on the video, or add one below.</span>`}
+      ${rows.map(p => `<div class="id-roles-grid">
+          <span title="${esc(p.name)}${p.tagged ? "" : " (not tagged in this game)"}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}
+            <button type="button" class="link" data-note="${p.roster_player_id}" title="${esc((p.note1 || p.note2) ? "Note: " + (p.note1 || p.note2) : "Add a note")}">${(p.note1 || p.note2) ? "✎•" : "✎"}</button>${p.tagged ? "" : `<button type="button" class="link danger" data-rm="${p.roster_player_id}" title="Remove from this list">×</button>`}</span>
+          ${sel(p.h1, `data-rid="${p.roster_player_id}" data-half="1"`, "—")}
+          ${sel(p.h2, `data-rid="${p.roster_player_id}" data-half="2"`, "Same as 1st")}
+        </div>`).join("")}
+      ${addable.length ? `<div class="row" style="gap:6px;margin-top:8px"><select id="id-role-add" style="flex:1"><option value="">Add a player not tagged…</option>${addable.map(x => `<option value="${x.player_id}">${esc(x.name)}</option>`).join("")}</select></div>` : ""}`;
+    const fail = e => toast((e.errors || [e.message]).join(" "), true);
+    box.querySelectorAll("select[data-rid]").forEach(el => el.onchange = async () => {
+      const p = rows.find(x => x.roster_player_id === +el.dataset.rid);
+      const half = +el.dataset.half;
+      try { await api("PUT", `/api/games/${gameId}/identity/roles/${el.dataset.rid}`, { half, position: el.value, note: half === 1 ? p.note1 : p.note2 }); toast("Saved"); refreshRoles(); } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("select[data-fm]").forEach(el => el.onchange = async () => {
+      try { await api("PUT", `/api/games/${gameId}/identity/formation`, { half: +el.dataset.fm, formation: el.value }); toast("Saved"); } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("[data-note]").forEach(b => b.onclick = async () => {
+      const p = rows.find(x => x.roster_player_id === +b.dataset.note);
+      const cur = p.note1 || p.note2 || "";
+      const txt = prompt(`Note for ${p.name} in this game (e.g. swapped wings after 10 minutes):`, cur);
+      if (txt === null) return;
+      try {
+        for (const [half, pos] of [[1, p.h1], [2, p.h2]]) if (pos) await api("PUT", `/api/games/${gameId}/identity/roles/${p.roster_player_id}`, { half, position: pos, note: txt });
+        if (!p.h1 && !p.h2) toast("Choose a position first, then add the note", true); else { toast("Saved"); refreshRoles(); }
+      } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+      extraRoleIds = extraRoleIds.filter(id => id !== +b.dataset.rm);
+      try { await api("DELETE", `/api/games/${gameId}/identity/roles/${b.dataset.rm}`); refreshRoles(); } catch (e) { fail(e); }
+    });
+    const add = document.getElementById("id-role-add");
+    if (add) add.onchange = () => { if (add.value) { extraRoleIds.push(+add.value); refreshRoles(); } };
+  };
+
+  // ---- quality: saved-positions state, coverage, problems with jump-to times, tidy, stale-ids banner
+  let recentWarnings = [], healthTimer = null, showAllIssues = false;
+  const jumpTo = t => { closeCtx(); pv.pause(); pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, t)); selectedTrack = null; };
+  const refreshHealth = async () => {
+    const box = document.getElementById("id-health"); if (!box) return;
+    let h;
+    try { h = await api("GET", `/api/games/${gameId}/identity/health`); }
+    catch (e) { box.textContent = "Quality check is not available."; return; }
+    const building = h.build && h.build.running;
+    const pos = h.positions || {};
+    const bits = [];
+    if (h.fingerprint && h.fingerprint.matches === false) {
+      bits.push(`<div class="notice bad"><b>Player ids have changed</b><ul><li>${esc(h.fingerprint.message)}</li></ul>
+        <button type="button" class="link" id="id-fp-accept">I have checked: the tags are right for these ids</button></div>`);
+    }
+    if (recentWarnings.length) {
+      bits.push(`<div class="notice warn"><b>Just now</b><ul>${recentWarnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>
+        <button type="button" class="link" id="id-warn-clear">Dismiss</button></div>`);
+    }
+    bits.push(!pos.exists
+      ? `<span class="chip warn">Positions not built</span>`
+      : (pos.current ? `<span class="chip ok">Positions up to date</span> <span class="muted">built ${esc(pos.built_at || "")}</span>`
+                     : `<span class="chip warn">Positions out of date</span> <span class="muted">built ${esc(pos.built_at || "")}</span>`));
+    if (h.build && h.build.error) bits.push(`<div class="notice bad"><b>Build failed</b><ul><li>${esc(h.build.error)}</li></ul></div>`);
+    if (h.players && h.players.length) {
+      bits.push(`<div style="margin-top:6px">${h.players.map(p => {
+        const c = k => (p.halves[k] ? p.halves[k].coverage_pct : null);
+        const low = [c("1"), c("2")].some(v => v != null && v < 60);
+        const f = v => (v == null ? "–" : Math.round(v) + "%");
+        return `<span class="chip ${low ? "warn" : "ok"}" title="Share of each half where this player is followed by a box">${esc(p.name.split(" ")[0])} ${f(c("1"))} / ${f(c("2"))}</span>`;
+      }).join("")}</div>`);
+    }
+    const issues = (h.issues || []).filter(i => i.kind !== "stale" && i.kind !== "ids_changed" && i.kind !== "no_positions");
+    const stateIssues = (h.issues || []).filter(i => ["stale", "no_positions"].includes(i.kind));
+    stateIssues.forEach(i => bits.push(`<div class="small" style="margin-top:6px">${esc(i.text)}</div>`));
+    if (issues.length) {
+      const shown = showAllIssues ? issues : issues.slice(0, 6);
+      bits.push(`<div style="margin-top:8px"><b>Problems (${issues.length})</b></div>` + shown.map(i => `
+        <div class="small" style="display:flex;gap:6px;align-items:baseline;margin-top:4px">
+          <span class="chip ${i.severity === "bad" ? "bad" : (i.severity === "warn" ? "warn" : "info")}">${i.severity === "bad" ? "Check" : (i.severity === "warn" ? "Warn" : "Note")}</span>
+          <span style="flex:1">${esc(i.text)}</span>
+          ${i.seek_t != null ? `<button type="button" class="link" data-jump="${i.seek_t}">Go</button>` : ""}
+        </div>`).join("") +
+        (issues.length > 6 ? `<button type="button" class="link" id="id-issues-more" style="margin-top:4px">${showAllIssues ? "Show fewer" : "Show all " + issues.length}</button>` : ""));
+    } else if (pos.exists && pos.current) {
+      bits.push(`<div class="small" style="margin-top:6px">No problems found.</div>`);
+    }
+    box.className = "small id-acc-body";
+    box.innerHTML = bits.join("");
+    const actions = document.getElementById("id-health-actions");
+    const nb = document.getElementById("id-build");
+    if (nb) { nb.disabled = !!(building || !h.tags); nb.textContent = building ? "Building…" : "Export and Build"; }
+    actions.innerHTML = (h.tidy_candidates ? `<button type="button" id="id-tidy" title="Delete tags that change nothing in the result (a copy is saved first)">Tidy ${h.tidy_candidates}</button>` : "");
+    box.querySelectorAll("[data-jump]").forEach(b => b.onclick = () => jumpTo(parseFloat(b.dataset.jump)));
+    const more = document.getElementById("id-issues-more"); if (more) more.onclick = () => { showAllIssues = !showAllIssues; refreshHealth(); };
+    const fp = document.getElementById("id-fp-accept");
+    if (fp) fp.onclick = async () => { try { await api("POST", `/api/games/${gameId}/identity/fingerprint/accept`); toast("Recorded"); refreshHealth(); } catch (e) { toast((e.errors || [e.message]).join(" "), true); } };
+    const wc = document.getElementById("id-warn-clear"); if (wc) wc.onclick = () => { recentWarnings = []; refreshHealth(); };
+    const bb = document.getElementById("id-build");
+    if (bb) bb.onclick = async () => {
+      try { const r = await api("POST", `/api/games/${gameId}/identity/build-positions`); toast(r.message || "Building…"); } catch (e) { toast((e.errors || [e.message]).join(" "), true); return; }
+      refreshHealth();
+    };
+    const tb = document.getElementById("id-tidy");
+    if (tb) tb.onclick = async () => {
+      try {
+        const dry = await api("POST", `/api/games/${gameId}/identity/tidy`, { dry_run: true });
+        if (!dry.count) { toast("Nothing to tidy"); return; }
+        if (!confirm(`Delete ${dry.count} tags that change nothing in the result?\n\nA copy is saved in the game's data folder first. The saved positions need building again afterwards.`)) return;
+        const r = await api("POST", `/api/games/${gameId}/identity/tidy`, { dry_run: false });
+        toast(`Tidied ${r.count} tags (copy: ${r.saved_to})`);
+        assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+        await refreshBreaks(); await refreshBoxes(true); refreshHealth();
+      } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+    };
+    clearTimeout(healthTimer);
+    if (building) healthTimer = setTimeout(refreshHealth, 2500);
+  };
+
+  const openAsg = new Set();
+  const renderAssignments = () => {
+    document.getElementById("id-asg-count").textContent = assignments.length ? `(${assignments.length})` : "";
+    if (!assignments.length) {
+      document.getElementById("id-assignments").innerHTML = `<span class="muted">None yet.</span>`;
+      return;
+    }
+    // collapse by person: latest open segment first
+    const byPerson = {};
+    assignments.forEach(a => {
+      (byPerson[a.roster_player_id] || (byPerson[a.roster_player_id] = [])).push(a);
+    });
+    document.getElementById("id-assignments").innerHTML = Object.values(byPerson).map(segs => {
+      segs = segs.slice().sort((a, b) => a.from_frame - b.from_frame);
+      const name = segs[0].name;
+      const rid = segs[0].roster_player_id;
+      const br = breakForRoster(rid);
+      const vf = (data.detections && data.detections.video_fps) || 24;
+      const tm = f => fmtT(f / vf);
+      const nIds = new Set(segs.map(s => s.track_player_id)).size;
+      const isOpen = openAsg.has(rid);
+      const detail = segs.map(s => `<div class="id-seg"><b>#${s.track_player_id}</b> ${tm(s.from_frame)} – ${s.to_frame == null ? "open" : tm(s.to_frame)} <span class="muted">(f${s.from_frame}${s.to_frame == null ? "→" : "–" + s.to_frame})</span></div>`).join("");
+      const breakBtns = br
+        ? `<span class="row" style="gap:8px;flex-wrap:nowrap">
+             <button type="button" class="link" data-break="${rid}" title="Jump to where track #${br.track_player_id} is lost">Break @ ${fmtT(br.lost_at_t)}</button>
+             <button type="button" class="link" data-skip-break="${rid}" title="Player not visible / not detected — skip this break">Skip</button>
+           </span>`
+        : `<span class="chip ok">OK</span>`;
+      return `<div class="id-asg-row"><div class="row spread" style="gap:6px;align-items:baseline"><b>${esc(name)}</b>${breakBtns}</div>
+        <button type="button" class="chip info id-badge" data-asg="${rid}" aria-expanded="${isOpen}" title="Show or hide the track ids and times">${nIds} ${nIds === 1 ? "track id" : "track ids"} ${isOpen ? "▾" : "▸"}</button>
+        ${isOpen ? `<div class="id-segs small">${detail}</div>` : ""}</div>`;
+    }).join("");
+    document.querySelectorAll("#id-assignments [data-asg]").forEach(btn => {
+      btn.onclick = () => { const r = +btn.dataset.asg; openAsg.has(r) ? openAsg.delete(r) : openAsg.add(r); renderAssignments(); };
+    });
+    document.querySelectorAll("#id-assignments [data-break]").forEach(btn => {
+      btn.onclick = () => jumpToBreak(breakForRoster(+btn.dataset.break));
+    });
+    document.querySelectorAll("#id-assignments [data-skip-break]").forEach(btn => {
+      btn.onclick = () => skipBreak(+btn.dataset.skipBreak);
+    });
+  };
+
+  const skipBreak = async (rosterPlayerId) => {
+    const br = breakForRoster(rosterPlayerId);
+    if (!br) { toast("No break to skip"); return; }
+    try {
+      const r = await api("POST", `/api/games/${gameId}/identity/skip-break`, { roster_player_id: rosterPlayerId });
+      toast(r.message || "Skipped");
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      // If other breaks remain, offer the next one
+      if (breaks.length) {
+        const next = breaks.find(b => b.seek_t >= (br.seek_t || 0)) || breaks[0];
+        jumpToBreak(next);
+      }
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  // Native <video controls> sit in the bottom strip — keep the canvas above them so Play works.
+  const CONTROLS_H = 56;
+
+  const clampPan = () => {
+    if (zoom <= 1.001) { panX = 0; panY = 0; return; }
+    const r = wrapEl.getBoundingClientRect();
+    const maxX = (r.width * (zoom - 1)) / 2 + 48;
+    const maxY = (r.height * (zoom - 1)) / 2 + 48;
+    panX = Math.max(-maxX, Math.min(maxX, panX));
+    panY = Math.max(-maxY, Math.min(maxY, panY));
+  };
+
+  const applyZoom = () => {
+    clampPan();
+    stage.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    const zoomInput = document.getElementById("id-zoom");
+    const zoomVal = document.getElementById("id-zoom-val");
+    const resetBtn = document.getElementById("id-zoom-reset");
+    if (zoomInput && Math.abs(parseFloat(zoomInput.value) - zoom) > 0.001) zoomInput.value = String(zoom);
+    if (zoomVal) zoomVal.textContent = `${Math.round(zoom * 100)}%`;
+    if (resetBtn) resetBtn.hidden = zoom <= 1.001 && Math.abs(panX) < 0.5 && Math.abs(panY) < 0.5;
+    cv.style.cursor = zoom > 1.001 ? "grab" : "crosshair";
+  };
+
+  const setZoom = (z, keepPan) => {
+    zoom = Math.max(1, Math.min(3, z));
+    if (!keepPan && zoom <= 1.001) { panX = 0; panY = 0; }
+    applyZoom();
+    draw();
+  };
+
+  const draw = () => {
+    // Layout sizes ignore CSS zoom on the stage (clientWidth); screen rects include it.
+    const layoutW = pv.clientWidth || stage.clientWidth;
+    const layoutH = pv.clientHeight || stage.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const coverH = Math.max(0, layoutH - CONTROLS_H);
+    cv.style.left = "0px";
+    cv.style.top = "0px";
+    cv.style.width = layoutW + "px";
+    cv.style.height = coverH + "px";
+    cv.width = Math.round(layoutW * dpr);
+    cv.height = Math.round(coverH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, layoutW, coverH);
+    if (!videoW || !videoH) return;
+    // object-fit: contain mapping inside the full video element box (including controls strip)
+    const scale = Math.min(layoutW / videoW, layoutH / videoH);
+    const dw = videoW * scale, dh = videoH * scale;
+    const ox = (layoutW - dw) / 2, oy = (layoutH - dh) / 2;
+    if (!boxes.length) return;
+    boxes.forEach(b => {
+      const x = ox + b.xmin * scale, y = oy + b.ymin * scale;
+      const w = (b.xmax - b.xmin) * scale, h = (b.ymax - b.ymin) * scale;
+      const named = !!b.name;
+      const sel = selectedTrack != null && b.track_player_id === selectedTrack;
+      ctx.lineWidth = sel ? 3 : 2;
+      ctx.strokeStyle = named ? "#3fa56c" : (b.is_polis ? "#feca02" : "rgba(255,255,255,.55)");
+      ctx.fillStyle = named ? "rgba(63,165,108,.18)" : (sel ? "rgba(254,202,2,.2)" : "rgba(0,0,0,.05)");
+      ctx.fillRect(x, y, w, h);
+      ctx.setLineDash(b.dup_track ? [6, 4] : []);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+      const label0 = b.name
+        ? `${b.name} #${b.track_player_id}`
+        : (b.is_polis ? `P #${b.track_player_id}` : `#${b.track_player_id}`);
+      const label = (b.dup_track ? "2 boxes · " : "") + label0;
+      ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+      const tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = named ? "rgba(31,111,67,.92)" : "rgba(0,0,0,.75)";
+      ctx.fillRect(x, Math.max(0, y - 18), tw, 18);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 4, Math.max(12, y - 5));
+      b._hit = { x, y, w, h };
+    });
+  };
+
+  const ensureSkipInPick = () => {
+    let skipPick = document.getElementById("id-skip-break");
+    if (!skipPick) {
+      const clearBtn = document.getElementById("id-clear");
+      if (!clearBtn || !clearBtn.parentElement) return;
+      clearBtn.insertAdjacentHTML("afterend",
+        `<button type="button" class="link" id="id-skip-break" style="margin-top:8px;margin-left:10px" hidden>Skip break</button>`);
+      skipPick = document.getElementById("id-skip-break");
+      skipPick.onclick = () => {
+        const br = breaks.find(b => b.track_player_id === selectedTrack)
+          || breaks.find(b => Math.abs(b.seek_t - (pv.currentTime || 0)) < 2.5);
+        if (!br) { toast("No break linked to this selection"); return; }
+        skipBreak(br.roster_player_id);
+      };
+    }
+    const near = breaks.find(b => b.track_player_id === selectedTrack)
+      || breaks.find(b => Math.abs(b.seek_t - (pv.currentTime || 0)) < 2.5);
+    skipPick.hidden = !near;
+  };
+
+  const hitBoxAt = (clientX, clientY) => {
+    const rect = cv.getBoundingClientRect();
+    // Map screen coords back through CSS zoom on the stage
+    const sx = cv.clientWidth / (rect.width || 1);
+    const sy = cv.clientHeight / (rect.height || 1);
+    const x = (clientX - rect.left) * sx;
+    const y = (clientY - rect.top) * sy;
+    let hit = null, area = Infinity;
+    boxes.forEach(b => {
+      const h = b._hit; if (!h) return;
+      if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) {
+        const a = h.w * h.h;
+        if (a < area) { area = a; hit = b; }
+      }
+    });
+    return hit;
+  };
+
+  const closeCtx = () => {
+    const menu = document.getElementById("id-ctx");
+    if (menu) menu.hidden = true;
+  };
+
+  const assignSelected = async (rosterPlayerId) => {
+    if (selectedTrack == null) return;
+    try {
+      const r = await api("POST", `/api/games/${gameId}/identity/assign`, {
+        roster_player_id: rosterPlayerId,
+        track_player_id: selectedTrack,
+        t: pv.currentTime,
+      });
+      toast(r.ended_overlapping
+        ? `Named (ended ${r.ended_overlapping} other link${r.ended_overlapping === 1 ? "" : "s"} so they aren’t in two places)`
+        : "Named");
+      closeCtx();
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      await refreshBoxes(true);
+      refreshRoles();
+      if (r.warnings && r.warnings.length) { recentWarnings = r.warnings.concat(recentWarnings).slice(0, 5); r.warnings.forEach(w => toast(w, true)); }
+      refreshHealth();
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  const clearSelected = async () => {
+    if (selectedTrack == null) return;
+    try {
+      await api("POST", `/api/games/${gameId}/identity/clear`, { track_player_id: selectedTrack, t: pv.currentTime });
+      toast("Cleared");
+      closeCtx();
+      assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+      await refreshBreaks();
+      await refreshBoxes(true);
+      refreshHealth();
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+
+  const filteredRoster = (q) => {
+    const needle = (q || "").trim().toLowerCase();
+    return roster.filter(p => !needle || p.name.toLowerCase().includes(needle));
+  };
+
+  const renderRosterButtons = (container, box, q) => {
+    const list = filteredRoster(q);
+    container.innerHTML = list.length
+      ? list.map(p => `<button type="button" class="id-name ${box && box.roster_player_id === p.player_id ? "on" : ""}" data-rid="${p.player_id}">
+          ${esc(p.name)} <span class="muted">${esc(squadLabel(p.squad))}</span></button>`).join("")
+      : `<span class="muted">No names match. Add players on the Teams page.</span>`;
+    container.querySelectorAll("[data-rid]").forEach(btn => {
+      btn.onclick = () => assignSelected(+btn.dataset.rid);
+    });
+  };
+
+  const openCtx = (clientX, clientY) => {
+    const menu = document.getElementById("id-ctx");
+    if (!menu || selectedTrack == null) return;
+    const box = boxes.find(b => b.track_player_id === selectedTrack);
+    const titled = box && box.name
+      ? `Track #${selectedTrack} · ${box.name}`
+      : `Track #${selectedTrack}${box && box.team ? " · " + box.team : ""}`;
+    menu.hidden = false;
+    menu.innerHTML = `
+      <p class="id-ctx-head">${esc(titled)} — pick a name</p>
+      <input class="id-ctx-filter" id="id-ctx-filter" placeholder="Filter names…" autocomplete="off">
+      <div class="id-ctx-list" id="id-ctx-list"></div>
+      <div class="id-ctx-foot">
+        ${box && box.name ? `<button type="button" class="link danger" id="id-ctx-clear">Clear name</button>` : ""}
+        <button type="button" class="link" id="id-ctx-close">Close</button>
+      </div>`;
+    const listEl = document.getElementById("id-ctx-list");
+    const filterEl = document.getElementById("id-ctx-filter");
+    renderRosterButtons(listEl, box, "");
+    filterEl.oninput = () => renderRosterButtons(listEl, box, filterEl.value);
+    const clearBtn = document.getElementById("id-ctx-clear");
+    if (clearBtn) clearBtn.onclick = () => clearSelected();
+    document.getElementById("id-ctx-close").onclick = closeCtx;
+    // Position near cursor, clamped to the viewport
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    const pad = 8;
+    let left = clientX + 4, top = clientY + 4;
+    if (left + mw > window.innerWidth - pad) left = Math.max(pad, clientX - mw - 4);
+    if (top + mh > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - mh - pad);
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    filterEl.focus();
+  };
+
+  const showPick = () => {
+    const wrap = document.getElementById("id-roster-wrap");
+    const pick = document.getElementById("id-pick");
+    const clearBtn = document.getElementById("id-clear");
+    if (selectedTrack == null) {
+      wrap.hidden = true;
+      pick.textContent = "Click a detection box on the video (right-click for a quick name list).";
+      const skipPick = document.getElementById("id-skip-break");
+      if (skipPick) skipPick.hidden = true;
+      return;
+    }
+    const box = boxes.find(b => b.track_player_id === selectedTrack);
+    wrap.hidden = false;
+    pick.textContent = "";
+    document.getElementById("id-pick-label").textContent =
+      box && box.name ? `Track #${selectedTrack} is ${box.name} — re-assign or clear:` : `Track #${selectedTrack}${box && box.team ? " · " + box.team : ""} — pick a name:`;
+    clearBtn.hidden = !(box && box.name);
+    ensureSkipInPick();
+    renderRosterButtons(document.getElementById("id-roster"), box, document.getElementById("id-filter").value);
+  };
+
+  const refreshBoxes = async (force) => {
+    if (!force && !pv.paused && Math.abs(pv.currentTime - (refreshBoxes._last || 0)) < 0.08) return;
+    refreshBoxes._last = pv.currentTime;
+    try {
+      const r = await api("GET", `/api/games/${gameId}/identity/boxes?t=${encodeURIComponent(pv.currentTime)}`);
+      boxes = r.boxes || [];
+      const conflicts = r.identity_conflicts || [];
+      let meta = r.frame_id != null
+        ? `frame ${r.frame_id} · ${boxes.length} boxes · ${boxes.filter(b => b.name).length} named`
+        : "no detections near here";
+      if (conflicts.length) {
+        meta += ` · ${conflicts.length} duplicate name${conflicts.length === 1 ? "" : "s"} cleared on this frame`;
+      }
+      document.getElementById("id-frame-meta").textContent = meta;
+      draw();
+      showPick();
+    } catch (e) {
+      document.getElementById("id-frame-meta").textContent = (e.errors || [e.message]).join(" ");
+    }
+  };
+
+  const scheduleRefresh = () => {
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(() => refreshBoxes(true), pv.paused ? 40 : 120);
+  };
+
+  pv.src = `/api/games/${gameId}/video?key=analysis`;
+  pv.addEventListener("loadedmetadata", () => {
+    videoW = pv.videoWidth; videoH = pv.videoHeight;
+    if (startT > 0 && startT < (pv.duration || 1e9)) pv.currentTime = startT;
+    draw(); refreshBoxes(true);
+  });
+  pv.addEventListener("timeupdate", () => {
+    document.getElementById("id-cur").textContent = fmtT(pv.currentTime);
+    scheduleRefresh();
+  });
+  pv.addEventListener("seeked", () => refreshBoxes(true));
+  pv.addEventListener("play", () => { document.getElementById("id-pause").textContent = "Pause"; });
+  pv.addEventListener("pause", () => { document.getElementById("id-pause").textContent = "Play"; refreshBoxes(true); });
+  window.addEventListener("resize", () => { applyZoom(); draw(); });
+
+  document.getElementById("id-pause").onclick = () => { pv.paused ? pv.play() : pv.pause(); };
+  document.getElementById("id-speed").onchange = e => { pv.playbackRate = parseFloat(e.target.value); };
+  document.querySelectorAll("[data-iskip]").forEach(b => b.onclick = () => {
+    const d = parseFloat(b.dataset.iskip);
+    if (Math.abs(d) < 1) pv.pause();
+    pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, pv.currentTime + d));
+  });
+  { const d = document.getElementById("id-roles-card"); if (d) d.addEventListener("toggle", () => secSave("idroles", d.open)); }
+  // Player tracking and Quality are an accordion: opening one closes the other, and the open one takes all the spare height
+  { const asg = document.getElementById("id-asg-fold"), hl = document.getElementById("id-health-card");
+    const remember = v => { try { localStorage.setItem("gl-sec-idacc", v); } catch (e) { /* ignore */ } };
+    asg.addEventListener("toggle", () => { if (asg.open) { hl.open = false; remember("asg"); } else if (!hl.open) remember(""); });
+    hl.addEventListener("toggle", () => { if (hl.open) { asg.open = false; remember("health"); } else if (!asg.open) remember(""); }); }
+  document.getElementById("id-filter").oninput = showPick;
+  document.getElementById("id-clear").onclick = () => clearSelected();
+
+  const goNextBreak = () => {
+    if (!breaks.length) { toast("No track breaks right now"); return; }
+    closeCtx();
+    // Prefer the earliest break at/after the current time; otherwise wrap to the first.
+    const t = pv.currentTime || 0;
+    const next = breaks.find(b => b.seek_t >= t - 0.05) || breaks[0];
+    jumpToBreak(next);
+  };
+  const goPrevBreak = () => {
+    if (!breaks.length) { toast("No track breaks right now"); return; }
+    closeCtx();
+    // Prefer the latest break strictly before the current time; otherwise wrap to the last.
+    const t = pv.currentTime || 0;
+    let prev = null;
+    for (let i = breaks.length - 1; i >= 0; i--) {
+      if (breaks[i].seek_t < t - 0.05) { prev = breaks[i]; break; }
+    }
+    jumpToBreak(prev || breaks[breaks.length - 1]);
+  };
+  document.getElementById("id-next-break").onclick = goNextBreak;
+  document.getElementById("id-prev-break").onclick = goPrevBreak;
+
+  const selectHit = (hit) => {
+    selectedTrack = hit ? hit.track_player_id : null;
+    pv.pause();
+    draw();
+    showPick();
+  };
+
+  document.getElementById("id-zoom").oninput = e => setZoom(parseFloat(e.target.value) || 1, true);
+  document.getElementById("id-zoom-reset").onclick = () => { panX = 0; panY = 0; setZoom(1, false); };
+
+  // Drag to pan when zoomed (or always — small moves still count as click)
+  let panDrag = null;
+  cv.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    panDrag = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origPanX: panX,
+      origPanY: panY,
+      moved: false,
+      panning: false,
+    };
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!panDrag || e.pointerId !== panDrag.pointerId) return;
+    const dx = e.clientX - panDrag.startX;
+    const dy = e.clientY - panDrag.startY;
+    if (!panDrag.moved && (dx * dx + dy * dy) > 36) {
+      panDrag.moved = true;
+      if (zoom > 1.001) {
+        panDrag.panning = true;
+        closeCtx();
+        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        wrapEl.classList.add("is-panning");
+      }
+    }
+    if (panDrag.panning) {
+      panX = panDrag.origPanX + dx;
+      panY = panDrag.origPanY + dy;
+      applyZoom();
+    }
+  });
+  const endPanDrag = e => {
+    if (!panDrag || (e && e.pointerId !== panDrag.pointerId)) return;
+    const wasPan = panDrag.panning;
+    const sx = panDrag.startX, sy = panDrag.startY;
+    wrapEl.classList.remove("is-panning");
+    panDrag = null;
+    if (wasPan) return; // consumed as pan
+    closeCtx();
+    selectHit(hitBoxAt(sx, sy));
+  };
+  cv.addEventListener("pointerup", endPanDrag);
+  cv.addEventListener("pointercancel", endPanDrag);
+
+  cv.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    panDrag = null;
+    wrapEl.classList.remove("is-panning");
+    const hit = hitBoxAt(e.clientX, e.clientY);
+    if (!hit) { closeCtx(); selectHit(null); return; }
+    selectHit(hit);
+    openCtx(e.clientX, e.clientY);
+  });
+
+  wrapEl.addEventListener("wheel", e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const next = zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08);
+    setZoom(next, true);
+  }, { passive: false });
+
+  document.addEventListener("pointerdown", e => {
+    const menu = document.getElementById("id-ctx");
+    if (!menu || menu.hidden) return;
+    if (!menu.contains(e.target)) closeCtx();
+  }, true);
+
+  applyZoom();
+
+  if (keyHandler) document.removeEventListener("keydown", keyHandler);
+  keyHandler = e => {
+    if (location.hash !== `#/game/${gameId}/identity`) return;
+    if (e.key === "Escape") { closeCtx(); return; }
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === " ") { e.preventDefault(); pv.paused ? pv.play() : pv.pause(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); pv.currentTime -= e.shiftKey ? 30 : 5; }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pv.currentTime += e.shiftKey ? 30 : 5; }
+    else if (e.key === ",") { pv.pause(); pv.currentTime -= 0.0417; }
+    else if (e.key === ".") { pv.pause(); pv.currentTime += 0.0417; }
+  };
+  document.addEventListener("keydown", keyHandler);
+
+  refreshBreaks();
+  refreshHealth();
+  refreshRoles();
+  showPick();
+}
+
+// ---------------------------------------------------------------------------------------------- teams
+
+const hex = rgb => "#" + rgb.map(n => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0")).join("");
+const unhex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+async function teamsPage() {
+  if (!META) META = await api("GET", "/api/meta");
+  const teams = await api("GET", "/api/teams");
+  if (location.hash !== "#/teams") return;
+  view.innerHTML = `<div class="row spread" style="margin-bottom:14px"><h1 style="margin:0">Teams</h1><button class="primary" id="t-new">+ New team</button></div>
+    <div class="card"><p class="muted small" style="margin-top:0">Kit colours are what the team classifier matches players against, so a team needs at least one colour before a game with that team is processed. Named players (men / women squad) are for later identity tracking — start with Polis Lions.</p>
+    <table><thead><tr><th>Team</th><th>Kit colours</th><th>Players</th><th>Games</th><th></th></tr></thead><tbody>
+    ${teams.map(t => `<tr><td><b>${esc(t.name)}</b> ${t.is_active ? "" : '<span class="chip">Inactive</span>'}${t.notes ? `<div class="muted small">${esc(t.notes)}</div>` : ""}</td>
+      <td>${t.kit_colours.length ? t.kit_colours.map(c => `<span class="swatch" style="background:rgb(${c.rgb.join(",")})" title="rgb ${c.rgb.join(", ")}"></span>`).join("") : '<span class="chip warn">No colours yet</span>'}</td>
+      <td>${playerCountLabel(t.players)}</td>
+      <td>${t.games}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="link" data-players="${t.team_id}">Players</button>
+        <button class="link" data-edit="${t.team_id}">Edit</button></td></tr>`).join("")}</tbody></table></div>
+    <dialog id="dlg"></dialog><dialog id="players-dlg" style="width:min(720px,96vw)"></dialog>`;
+  const dlg = document.getElementById("dlg");
+  const playersDlg = document.getElementById("players-dlg");
+  const colourRow = (c = { rgb: [128, 128, 128], tolerance: [10, 50, 50] }) => `<div class="row kc" style="margin-bottom:6px;flex-wrap:nowrap">
+      <input type="color" class="kc-rgb" value="${hex(c.rgb)}"><span class="small muted">tolerance H S V</span>
+      ${c.tolerance.map((n, i) => `<input class="kc-tol" type="number" min="0" style="width:72px" value="${n}">`).join("")}
+      <button type="button" class="link danger kc-del">Remove</button></div>`;
+  const edit = t => {
+    t = t || { name: "", notes: "", is_active: true, kit_colours: [{ rgb: [128, 128, 128], tolerance: [10, 50, 50] }] };
+    dlg.innerHTML = `<h2>${t.team_id ? "Edit team" : "New team"}</h2><div id="dlg-msg"></div>
+      <label>Name <span class="small">(must match what you want in game titles)</span></label><input id="t-name" value="${esc(t.name)}">
+      <label style="margin-top:10px">Notes</label><input id="t-notes" value="${esc(t.notes || "")}">
+      <label style="margin-top:10px;display:flex;gap:6px;align-items:center;color:var(--text)"><input type="checkbox" id="t-active" ${t.is_active ? "checked" : ""}> Active (offered when logging new games)</label>
+      <h2 style="margin-top:16px">Kit colours</h2><div id="kcs">${t.kit_colours.map(colourRow).join("")}</div>
+      <button type="button" id="kc-add">+ Add colour</button>
+      <div class="row spread" style="margin-top:18px"><div>${t.team_id ? `<button class="danger" id="t-del" type="button">Delete team</button>` : ""}</div>
+      <div class="row"><button type="button" id="t-cancel">Cancel</button><button class="primary" id="t-save" type="button">Save</button></div></div>`;
+    dlg.showModal();
+    const $ = id => dlg.querySelector("#" + id);
+    $("kc-add").onclick = () => $("kcs").insertAdjacentHTML("beforeend", colourRow());
+    $("kcs").onclick = e => { if (e.target.classList.contains("kc-del")) e.target.closest(".kc").remove(); };
+    $("t-cancel").onclick = () => dlg.close();
+    if ($("t-del")) $("t-del").onclick = async () => {
+      const msg = t.games ? `Delete "${t.name}"?\n\nIt is used in ${t.games} game(s). It will be removed from those games (they keep their scores, videos and everything else, but will show "Teams missing" until you pick a team again). A backup of the database is taken first.`
+                          : `Delete "${t.name}"?`;
+      if (!confirm(msg)) return;
+      try { await api("DELETE", `/api/teams/${t.team_id}${t.games ? "?clear_from_games=true" : ""}`); dlg.close(); toast("Team deleted"); teamsPage(); }
+      catch (e) { $("dlg-msg").innerHTML = notice("bad", "Not deleted:", e.errors); }
+    };
+    $("t-save").onclick = async () => {
+      const body = { name: $("t-name").value, notes: $("t-notes").value, is_active: $("t-active").checked,
+        kit_colours: [...dlg.querySelectorAll(".kc")].map(r => ({ rgb: unhex(r.querySelector(".kc-rgb").value), tolerance: [...r.querySelectorAll(".kc-tol")].map(i => parseInt(i.value, 10) || 0) })) };
+      try { await api(t.team_id ? "PUT" : "POST", t.team_id ? `/api/teams/${t.team_id}` : "/api/teams", body); dlg.close(); toast("Saved"); teamsPage(); }
+      catch (e) { $("dlg-msg").innerHTML = notice("bad", "Not saved:", e.errors); }
+    };
+  };
+  const openPlayers = async team => {
+    const squads = (META && META.player_squads) || ["mens", "womens", "both"];
+    const render = async () => {
+      const players = await api("GET", `/api/teams/${team.team_id}/players`);
+      if (location.hash !== "#/teams") return;
+      const rows = players.length ? players.map(p => `<tr>
+          <td><b>${esc(p.name)}</b>${p.is_active ? "" : ' <span class="chip">Inactive</span>'}${p.notes ? `<div class="muted small">${esc(p.notes)}</div>` : ""}</td>
+          <td><span class="chip info">${esc(squadLabel(p.squad))}</span></td>
+          <td style="text-align:right;white-space:nowrap">
+            <button type="button" class="link" data-pedit="${p.player_id}">Edit</button>
+            <button type="button" class="link danger" data-pdel="${p.player_id}">Delete</button>
+          </td></tr>`).join("")
+        : `<tr><td colspan="3" class="muted">No players yet — add the men's and women's squad names below.</td></tr>`;
+      playersDlg.innerHTML = `<h2>Players — ${esc(team.name)}</h2>
+        <p class="muted small" style="margin-top:0">One club can have a men's and a women's squad (e.g. Polis Lions). Use <b>Both</b> only if the same person plays in both.</p>
+        <div id="p-msg"></div>
+        <table><thead><tr><th>Name</th><th>Squad</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <h2 style="margin-top:18px" id="p-form-title">Add player</h2>
+        <div class="grid">
+          <div class="c5"><label>Name</label><input id="p-name" placeholder="e.g. Andreas"></div>
+          <div class="c3"><label>Squad</label><select id="p-squad">${squads.map(s => `<option value="${s}">${esc(squadLabel(s))}</option>`).join("")}</select></div>
+          <div class="c4" style="display:flex;align-items:flex-end;gap:10px;padding-bottom:2px">
+            <label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)"><input type="checkbox" id="p-active" checked> Active</label>
+          </div>
+          <div class="c12"><label>Notes <span class="small muted">(optional)</span></label><input id="p-notes"></div>
+        </div>
+        <div class="row spread" style="margin-top:16px">
+          <button type="button" id="p-close">Close</button>
+          <div class="row"><button type="button" id="p-cancel-edit" hidden>Cancel edit</button>
+            <button class="primary" type="button" id="p-save">Add player</button></div>
+        </div>`;
+      let editingId = null;
+      const $ = id => playersDlg.querySelector("#" + id);
+      const setForm = p => {
+        editingId = p ? p.player_id : null;
+        $("p-form-title").textContent = p ? "Edit player" : "Add player";
+        $("p-save").textContent = p ? "Save player" : "Add player";
+        $("p-cancel-edit").hidden = !p;
+        $("p-name").value = p ? p.name : "";
+        $("p-squad").value = p ? p.squad : "mens";
+        $("p-active").checked = p ? !!p.is_active : true;
+        $("p-notes").value = p ? (p.notes || "") : "";
+        if (!p) $("p-msg").innerHTML = "";
+      };
+      $("p-close").onclick = () => { playersDlg.close(); teamsPage(); };
+      $("p-cancel-edit").onclick = () => setForm(null);
+      $("p-save").onclick = async () => {
+        const body = { name: $("p-name").value, squad: $("p-squad").value, is_active: $("p-active").checked, notes: $("p-notes").value };
+        try {
+          if (editingId) await api("PUT", `/api/teams/${team.team_id}/players/${editingId}`, body);
+          else await api("POST", `/api/teams/${team.team_id}/players`, body);
+          toast(editingId ? "Player saved" : "Player added");
+          await render();
+        } catch (e) { $("p-msg").innerHTML = notice("bad", "Not saved:", e.errors); }
+      };
+      playersDlg.querySelectorAll("[data-pedit]").forEach(b => {
+        b.onclick = () => setForm(players.find(p => p.player_id === +b.dataset.pedit));
+      });
+      playersDlg.querySelectorAll("[data-pdel]").forEach(b => {
+        b.onclick = async () => {
+          const p = players.find(x => x.player_id === +b.dataset.pdel);
+          if (!p || !confirm(`Delete player "${p.name}" from ${team.name}?`)) return;
+          try { await api("DELETE", `/api/teams/${team.team_id}/players/${p.player_id}`); toast("Player deleted"); await render(); }
+          catch (e) { $("p-msg").innerHTML = notice("bad", "Not deleted:", e.errors); }
+        };
+      });
+    };
+    await render();
+    playersDlg.showModal();
+  };
+  document.getElementById("t-new").onclick = () => edit(null);
+  view.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => edit(teams.find(t => t.team_id === +b.dataset.edit)));
+  view.querySelectorAll("[data-players]").forEach(b => b.onclick = () => openPlayers(teams.find(t => t.team_id === +b.dataset.players)));
+}
+
+// ---------------------------------------------------------------------------------------------- settings
+
+async function settingsPage() {
+  META = await api("GET", "/api/meta");
+  if (location.hash !== "#/settings") return;
+  view.innerHTML = `<h1>Settings</h1><div id="msgs"></div>
+    <div class="card"><div class="grid">
+      <div class="c4"><label>Default running speed (km/h)</label><input id="s-speed" type="number" step="0.5" value="${esc(META.running_speed_km_h)}"></div>
+      <div class="c8" style="grid-column:span 8"><label>Pitch Calibrator link</label><input id="s-cal" value="${esc(META.calibrator_url)}"></div>
+    </div><div style="margin-top:14px"><button class="primary" id="s-save">Save settings</button></div></div>
+    <div class="card"><h2>Data folder</h2>
+      <p class="small muted" style="margin-top:0">Where your games are kept: one folder per game, with its videos, detections database and reports (normally on the external drive). Change it here if the drive is replaced or mounted under another name.</p>
+      <label>Data folder</label>
+      <div class="row" style="flex-wrap:nowrap"><input id="s-root" value="${esc((META.data_root || {}).path || "")}" placeholder="/Volumes/LaCie/walking-football" ${META.data_root_from_env ? "disabled" : ""}><button type="button" id="s-root-browse" ${META.data_root_from_env ? "disabled" : ""}>Browse...</button></div>
+      <div class="small" style="margin-top:6px">${!(META.data_root || {}).set ? `<span class="muted">Not set - the old shared output folder is used.</span>`
+        : META.data_root.exists ? `<span style="color:var(--ok)">Connected.</span> Database backups are also copied to <code>${esc(META.data_root.path)}/_app-data/game-logger-backups</code>.`
+        : `<span style="color:var(--warn)">Not connected right now.</span>`}${META.data_root_from_env ? " (Set by the WALKING_FOOTBALL_ROOT environment variable.)" : ""}</div>
+      <div style="margin-top:12px"><button class="primary" id="s-root-save">Save data folder</button> <span class="small muted">Leave it empty and save to go back to the old output folder.</span></div></div>
+    <div class="card"><h2>Your data</h2>
+      <p class="small">Database file (kept on this computer): <code>${esc(META.db_path)}</code><br>Daily backups are kept in: <code>${esc(META.backup_dir)}</code>${(META.data_root || {}).exists ? ", and a copy on the data folder." : ""}</p>
+      <a class="btn" href="/api/export.xlsx">Download everything as a spreadsheet</a>
+      <p class="muted small">A read-only copy in the old games-logger.xlsx layout, for safekeeping. Changes made in that file are not read back in.</p></div>
+    <p class="muted small">Game logger ${esc(META.version)}</p>`;
+  document.getElementById("s-root-browse").onclick = () => openPicker(document.getElementById("s-root"), "Choose the data folder", { folder: true });
+  document.getElementById("s-root-save").onclick = async () => {
+    try {
+      META = await api("PUT", "/api/settings", { data_root: document.getElementById("s-root").value });
+      toast("Data folder saved"); settingsPage();
+    } catch (e) { document.getElementById("msgs").innerHTML = notice("bad", "Not saved:", e.errors); }
+  };
+  document.getElementById("s-save").onclick = async () => {
+    try {
+      META = await api("PUT", "/api/settings", { running_speed_km_h: document.getElementById("s-speed").value, calibrator_url: document.getElementById("s-cal").value });
+      toast("Settings saved");
+    } catch (e) { document.getElementById("msgs").innerHTML = notice("bad", "Not saved:", e.errors); }
+  };
+}
+
+// ---------------------------------------------------------------------------------------------- file picker
+
+const fmtSize = n => n > 1e9 ? (n / 1e9).toFixed(1) + " GB" : n > 1e6 ? (n / 1e6).toFixed(0) + " MB" : Math.max(1, Math.round(n / 1e3)) + " KB";
+
+async function openPicker(input, title, opts = {}) {
+  let dlg = document.getElementById("picker");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "picker"; document.body.appendChild(dlg); }
+  let showAll = false;
+  const load = async path => {
+    try {
+      render(await api("GET", `/api/browse?path=${encodeURIComponent(path || "")}&all=${showAll}&current=${encodeURIComponent(input.value)}` + (opts.game != null ? `&game=${opts.game}` : "")));
+    } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+  };
+  const render = r => {
+    if (opts.folder) r.entries = r.entries.filter(e => e.type === "dir");
+    dlg.innerHTML = `<h2>${esc(title)}</h2>
+      <div class="row" style="margin-bottom:8px">${r.shortcuts.map((s, i) => `<button type="button" class="link" data-sc="${i}">${esc(s.label)}</button>`).join("")}</div>
+      <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><button type="button" id="pk-up" ${r.parent ? "" : "disabled"}>Up</button>
+        <input id="pk-path" value="${esc(r.path)}"><button type="button" id="pk-go">Go</button></div>
+      ${r.note ? notice("warn", "", [r.note]) : ""}
+      <div class="pk-list">${r.entries.map((e, i) => `<div class="pk-row" data-i="${i}">
+          <span class="pk-name">${e.type === "dir" ? "&#9656; " : ""}${esc(e.name)}</span><span class="muted small">${e.type === "dir" ? "" : fmtSize(e.size)}</span></div>`).join("")
+        || '<div class="muted" style="padding:14px">${opts.folder ? "No folders here." : "No folders or video files here."}</div>'}</div>
+      <div class="row spread" style="margin-top:12px"><label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)">${opts.folder ? "" : `<input type="checkbox" id="pk-all" ${showAll ? "checked" : ""}> Show all file types`}</label>
+        <span>${opts.folder ? `<button type="button" class="primary" id="pk-use">Use this folder</button> ` : ""}<button type="button" id="pk-cancel">Cancel</button></span></div>`;
+    const $ = id => dlg.querySelector("#" + id);
+    dlg.querySelectorAll("[data-sc]").forEach(b => b.onclick = () => load(r.shortcuts[+b.dataset.sc].path));
+    $("pk-up").onclick = () => load(r.parent);
+    $("pk-go").onclick = () => load($("pk-path").value);
+    $("pk-path").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); load($("pk-path").value); } };
+    if ($("pk-all")) $("pk-all").onchange = e => { showAll = e.target.checked; load(r.path); };
+    if ($("pk-use")) $("pk-use").onclick = () => { input.value = r.path; input.dispatchEvent(new Event("input", { bubbles: true })); dlg.close(); };
+    $("pk-cancel").onclick = () => dlg.close();
+    dlg.querySelectorAll(".pk-row").forEach(row => row.onclick = async () => {
+      const e = r.entries[+row.dataset.i];
+      if (e.type === "dir") { load(e.path); return; }
+      input.value = e.stored;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      try { await api("PUT", "/api/video-folder", { path: r.path }); } catch (err) { /* remembering the folder is optional */ }
+      dlg.close();
+    });
+  };
+  dlg.showModal();
+  load("");
+}

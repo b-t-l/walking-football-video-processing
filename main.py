@@ -33,6 +33,7 @@ def main():
     RUN_DETECTIONS_REPORT = True   # run report to check how performance of detections/transformation
     RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
     RUN_TEAM_IMAGES = False  # save pictures of the players from 10 random frames, sorted by what the team model says (to correct + retrain it)
+    RUN_PLAYER_POSITIONS = False  # save the named-player layer (Identity page tags resolved with fixed rules) as <game folder>/data/NNNN_players.db for reports and agents; needs Transformations done and tags made
     RUN_YOUTUBE_DESCRIPTION = False  # write the .txt to paste into the YouTube description (game details, times, goal estimates); uses the goal detection result
     RUN_GOAL_DETECTION = False  # find the restarts from the centre spot (a goal is followed by one) and compare with the score; needs Transformations done
     RUN_BALL_IMAGES = False  # save 40 full frames chosen to teach the ball detector where it fails (lost ball, false balls, small, fast...) for Roboflow
@@ -54,7 +55,7 @@ def main():
     import argparse
     _ap = argparse.ArgumentParser()
     _ap.add_argument('--game', type=int, help='game id to process')
-    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, player_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, player_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description, player_positions')
     _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
     _ap.add_argument('--annotate-background', choices=['analysis', 'edited'], default='analysis',
                      help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard, overhead map)')
@@ -67,7 +68,7 @@ def main():
         GAME_ID = _args.game
     if _args.steps is not None:
         _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
-        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'player_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description'}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'player_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description', 'player_positions'}
         if _unknown_steps:
             raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
         RUN_DETECTIONS = 'detections' in _steps
@@ -82,6 +83,7 @@ def main():
         RUN_BROADCAST_PITCH_IMAGES = 'broadcast_pitch_images' in _steps
         RUN_GOAL_DETECTION = 'goal_detection' in _steps
         RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
+        RUN_PLAYER_POSITIONS = 'player_positions' in _steps
     ANNOTATE_BACKGROUND = _args.annotate_background or 'analysis'
     ANNOTATE_EDITED_PITCH = bool(getattr(_args, 'annotate_edited_pitch', False))
     if getattr(_args, 'player_report', None):
@@ -194,6 +196,27 @@ def main():
 
     print('-------------------------- PROCESSING STARTED: ')
 
+    # run record (game logger data folder): which steps ran and finished, so the Run panel can tell what is out of date. Test runs are not recorded.
+    _record_steps = [_n for _n, _on in (('detections', RUN_DETECTIONS), ('transformations', RUN_TRANSFORMATIONS), ('detection_report', RUN_DETECTIONS_REPORT),
+                     ('match_report', RUN_MATCH_REPORT), ('opposition_report', RUN_OPPOSITION_REPORT), ('player_positions', RUN_PLAYER_POSITIONS),
+                     ('player_report', RUN_PLAYER_REPORT), ('annotation', RUN_ANNOTATION_VIDEO_CREATOR), ('team_images', RUN_TEAM_IMAGES),
+                     ('goal_detection', RUN_GOAL_DETECTION), ('youtube_description', RUN_YOUTUBE_DESCRIPTION), ('ball_images', RUN_BALL_IMAGES),
+                     ('broadcast_pitch_images', RUN_BROADCAST_PITCH_IMAGES)) if _on]
+    def _rec_done(_step):
+        if DURATION or _step not in _record_steps:
+            return
+        try:
+            from game_logger import run_status as _rs
+            _rs.mark_done(GAME_ID, _step)
+        except Exception as _e:
+            print(f"(run record not updated: {_e})")
+    if _record_steps and not DURATION:
+        try:
+            from game_logger import run_status as _rs
+            _rs.mark_started(GAME_ID, _record_steps)
+        except Exception as _e:
+            print(f"(run record not started: {_e})")
+
     # - DETECTIONS SAVE TO DB: run YOLO detections and team assigner then store to db
     if RUN_DETECTIONS == True:
         database = CreateDatabase(DURATION, 
@@ -210,6 +233,7 @@ def main():
                                 GAME_PITCH_BOUNDARIES,
                                 WORK_DIR=WORK_DIR)
         database.run()
+        _rec_done('detections')
 
 
     # - TRANSFORMATIONS: Do calculations for view transforming (to get positions in vertical/map view and calculate from it the speed/distance calculations:
@@ -234,6 +258,7 @@ def main():
         # which way each team attacks (+x / -x): short sample at kick-off, flip at half-time if set; stored in the detections DB
         DirectionOfPlay(DATABASE_FILE, GAME_RECORD,
                         [GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")]).run()
+        _rec_done('transformations')
 
 
     # - DETECTION REPORT: create report with detection statistics
@@ -244,6 +269,7 @@ def main():
                                         GAME_RECORD,
                                         DETECTION_FPS)
         report.run()
+        _rec_done('detection_report')
 
 
     # - MATCH REPORT: 12-page PDF with team statistics for both teams
@@ -254,6 +280,7 @@ def main():
                                    GAME_RECORD,
                                    DETECTION_FPS)
         report.run()
+        _rec_done('match_report')
 
     # - OPPOSITION REPORTS: one scouting PDF per team, written for the other team's coach
     if RUN_OPPOSITION_REPORT == True:
@@ -263,6 +290,13 @@ def main():
                                             GAME_RECORD,
                                             DETECTION_FPS)
         opposition.run()
+        _rec_done('opposition_report')
+
+    # - PLAYER POSITIONS: resolve the Identity tags once and save them (positions, quality, tag collisions) next to the game's detections
+    if RUN_PLAYER_POSITIONS == True:
+        from player_positions import build_player_positions
+        build_player_positions(GAME_ID)
+        _rec_done('player_positions')
 
     # - PLAYER REPORT: distance / speed / possession-coloured pitch dots for named players or a whole team
     if RUN_PLAYER_REPORT == True:
@@ -273,6 +307,7 @@ def main():
                                            DETECTION_FPS,
                                            target=PLAYER_REPORT_TARGET)
         player_report.run()
+        _rec_done('player_report')
 
     # - TEAM TRAINING IMAGES: players from 10 random frames saved as pictures, filed by what the team model said
     if RUN_TEAM_IMAGES == True:
@@ -283,6 +318,7 @@ def main():
                           GAME_RECORD,
                           n_frames=10,
                           team_model_path=os.path.join('models', 'teams', TEAM_MODEL_FILE)).run()
+        _rec_done('team_images')
 
     # - BALL TRAINING IMAGES: 40 full frames picked where the ball detector is weak (ball lost, false balls, tiny, fast ...)
     if RUN_BALL_IMAGES == True:
@@ -292,6 +328,7 @@ def main():
                           BALL_IMAGES_FOLDER,
                           GAME_RECORD,
                           n_frames=40).run()
+        _rec_done('ball_images')
 
     # - BROADCAST VIDEO PITCH TRAINING IMAGES: frames from the edited / broadcast video for Roboflow pitch keypoints
     if RUN_BROADCAST_PITCH_IMAGES == True:
@@ -312,6 +349,7 @@ def main():
                                     BROADCAST_PITCH_FOLDER,
                                     GAME_RECORD,
                                     n_frames=40).run()
+        _rec_done('broadcast_pitch_images')
 
     # - GOAL DETECTION: restarts from the centre spot (version 0), compared with the score in the game logger
     if RUN_GOAL_DETECTION == True:
@@ -319,6 +357,7 @@ def main():
                       OUTPUT_PATH,
                       GAME_RECORD,
                       GAME_RECORD['statistics_source_video']).run()
+        _rec_done('goal_detection')
 
     # - YOUTUBE DESCRIPTION: a .txt for the video description: teams, date, game times and the goal estimates (click-able time stamps)
     if RUN_YOUTUBE_DESCRIPTION == True:
@@ -326,6 +365,7 @@ def main():
                            GAME_RECORD,
                            DATABASE_FILE,
                            GAME_RECORD['statistics_source_video']).run()
+        _rec_done('youtube_description')
 
     # - ANNOTATED VIDEO: run creating an annotated video with player detections, pitch top view etc
     if RUN_ANNOTATION_VIDEO_CREATOR == True:
@@ -346,6 +386,7 @@ def main():
                                 FIELD_OVERLAYS=ANNOTATE_FIELD_OVERLAYS,
                                 EDITED_PITCH_THIRDS=ANNOTATE_EDITED_PITCH)
         annotated_video.run()
+        _rec_done('annotation')
 
 
 if __name__ == '__main__':

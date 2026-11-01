@@ -182,6 +182,13 @@ def boxes_at_time(conn, game_id, t):
             "roster_player_id": asg["roster_player_id"] if asg else None,
             "assignment_id": asg["id"] if asg else None,
         })
+    # A stitched id that has two boxes on one frame (usually a goalkeeper box merged into a player's track): mark both so the page can say so.
+    counts = {}
+    for b in boxes:
+        if b["track_player_id"] is not None:
+            counts[b["track_player_id"]] = counts.get(b["track_player_id"], 0) + 1
+    for b in boxes:
+        b["dup_track"] = counts.get(b["track_player_id"], 0) > 1
     # One person → one box on this frame: if a name appears twice, keep it on the stronger box only.
     conflicts = _dedupe_names_on_frame(boxes)
     return {
@@ -328,6 +335,12 @@ def assign(conn, game, roster_player_id, track_player_id, t):
         VALUES (?,?,?,?,NULL,NULL,?)
         """,
         (game_id, roster_player_id, track_player_id, frame_id, now_iso()),
+    )
+    # Tidy as we go: the new open link already covers everything from this frame on, so any later link for the same person on the
+    # same track says nothing new.
+    conn.execute(
+        "DELETE FROM identity_assignments WHERE game_id = ? AND roster_player_id = ? AND track_player_id = ? AND id != ? AND from_frame >= ?",
+        (game_id, roster_player_id, track_player_id, cur.lastrowid, frame_id),
     )
     conn.commit()
     out = get_assignment(conn, cur.lastrowid)

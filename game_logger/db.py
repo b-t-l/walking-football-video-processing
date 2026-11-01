@@ -6,7 +6,7 @@ import datetime
 
 from . import config
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_V1 = """
 CREATE TABLE settings (
@@ -107,6 +107,24 @@ MIGRATIONS = {
     ],
     5: [                                                        # v6: skip a break when the player is off-camera / not detected
         "ALTER TABLE identity_assignments ADD COLUMN skip_until_frame INTEGER",
+    ],
+    6: [                                                        # v7: the position each player played (per half) and the formation (per half)
+        """CREATE TABLE game_player_positions (
+            game_id           INTEGER NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+            roster_player_id  INTEGER NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+            half              INTEGER NOT NULL,
+            position          TEXT NOT NULL,
+            note              TEXT,
+            updated_at        TEXT,
+            PRIMARY KEY (game_id, roster_player_id, half)
+        )""",
+        """CREATE TABLE game_formations (
+            game_id    INTEGER NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+            half       INTEGER NOT NULL,
+            formation  TEXT NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY (game_id, half)
+        )""",
     ],
 }
 

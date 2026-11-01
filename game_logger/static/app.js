@@ -160,10 +160,13 @@ const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); return String(Math.floo
 const parseT = v => { v = (v || "").trim(); if (!v) return null; const p = v.split(":"); if (p.length > 3 || p.some(x => !/^\d+$/.test(x))) return null; return p.reduce((a, x) => a * 60 + parseInt(x, 10), 0); };
 
 function secOpen(name, dflt) { try { const v = localStorage.getItem("gl-sec-" + name); return v === null ? dflt : v === "1"; } catch (e) { return dflt; } }
+function idAccOpen() { try { const v = localStorage.getItem("gl-sec-idacc"); return v === null ? "asg" : v; } catch (e) { return "asg"; } }
 function secSave(name, open) { try { localStorage.setItem("gl-sec-" + name, open ? "1" : "0"); } catch (e) { /* ignore */ } }
 
-function sec(name, title, body, isNew) {
-  return `<details class="sec" data-sec="${name}" ${isNew || secOpen(name, false) ? "open" : ""}><summary><span class="sec-title">${title}</span><span class="sec-sum" id="sum-${name}"></span></summary><div class="sec-body">${body}</div></details>`;
+function secNum(n) { return n ? `<span class="sec-num" title="Step ${n} of 5">${n}</span>` : ""; }
+
+function sec(name, title, body, isNew, num) {
+  return `<details class="sec" data-sec="${name}" ${isNew || secOpen(name, false) ? "open" : ""}><summary>${secNum(num)}<span class="sec-title">${title}</span><span class="sec-sum" id="sum-${name}"></span></summary><div class="sec-body">${body}</div></details>`;
 }
 
 function exclusionRow(ex = {}) {
@@ -233,8 +236,7 @@ async function gamePage(id) {
   const savedPlayerReport = (() => { try { return localStorage.getItem("gl-player-report-target") || ""; } catch (e) { return ""; } })();
   const hasEditedVideo = !!(g.videos && g.videos.edited && g.videos.edited.exists);
   const annotateBg = (savedAnnotateBg === "edited" && hasEditedVideo) ? "edited" : "analysis";
-  const runBody = isNew ? "" : `
-      <div class="run-steps">${RUN_STEPS.map(([k, l, h]) => `<label class="run-step"><input type="checkbox" data-step="${k}" ${savedSteps.includes(k) ? "checked" : ""}> <b>${l}</b> <span class="small muted">${h}</span></label>`).join("")}</div>
+  const annotateOptsHtml = `
       <div class="run-annotate-bg" id="run-annotate-bg-row">
         <label>Background video <select id="run-annotate-bg" style="width:auto">
           <option value="analysis" ${annotateBg === "analysis" ? "selected" : ""}>Analysis video</option>
@@ -247,24 +249,34 @@ async function gamePage(id) {
           <span class="small muted">Runs the pitch-keypoint model on every frame (slower). Only applies when Background is Edited.</span>
         </label>
       </div>
+`;
+  const playerReportOptsHtml = `
       <div class="run-annotate-bg" id="run-player-report-row" style="opacity:0.55">
         <label>Player report for <select id="run-player-report" style="width:auto;min-width:14em" disabled data-saved="${esc(savedPlayerReport)}">
           <option value="">Loading…</option>
         </select></label>
         <span class="small muted">Used when Player report is ticked. Name players on Track Players for named options; whole-team always available.</span>
       </div>
-      <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
-        <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
-      <div class="row" style="margin-top:12px;gap:10px"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><span id="run-status" class="small"></span></div>
+`;
+  const runBody = isNew ? "" : `
+      <div class="row" style="margin:10px 0 0;gap:10px"><span id="run-status" class="small"></span></div>
       <div id="run-msg"></div>
+      <div id="run-console-wrap" hidden>
       <div class="run-view" id="run-view">
-        <div class="run-view-bar"><span class="row" style="gap:14px;align-items:center"><span class="run-view-title">Run output</span><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label></span><span class="row" style="gap:8px"><button type="button" class="danger" id="run-stop2" disabled>Stop</button><button type="button" id="run-max" title="Fill the browser window with the run output (Esc to go back)">Full window</button></span></div>
+        <div class="run-view-bar"><span class="row" style="gap:14px;align-items:center"><span class="run-view-title">Run output</span><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="run-follow" checked> Follow new output</label></span><span class="row" style="gap:8px"><button type="button" class="danger" id="run-stop2" disabled>Stop</button><button type="button" id="run-max-close">Close full window</button></span></div>
         <div class="run-bar" id="run-bar" hidden><div id="run-bar-fill"></div></div>
         <div class="small muted run-line" id="run-line"></div>
         <pre class="console" id="run-console">Nothing has been run yet.</pre>
       </div>
       <div class="row spread" style="margin-top:8px"><span class="small muted">Esc closes the full window view.</span>
         <span class="row" style="gap:8px"><select id="run-past" style="width:auto;max-width:360px"><option value="">Earlier runs...</option></select><button type="button" id="run-past-view">Show log</button><button type="button" id="run-back" hidden>Back to current</button></span></div>
+      </div>
+      ${RUN_GROUPS.map(([title, note, ids]) => `<div class="run-group"><div class="run-group-h"><b>${title}</b><div class="small muted">${note}</div></div>
+      <div class="run-steps">${RUN_STEPS.filter(x => ids.includes(x[0])).map(([k, l, h]) => `<label class="run-step"><input type="checkbox" data-step="${k}" ${savedSteps.includes(k) ? "checked" : ""}> <b>${l}</b> <span class="chip" data-chip="${k}" hidden></span> <span class="info-i" tabindex="0" role="note" aria-label="${esc(h)}" data-tip="${esc(h)}" onclick="event.preventDefault();event.stopPropagation()">i</span></label>${k === "annotation" ? annotateOptsHtml : ""}${k === "player_report" ? playerReportOptsHtml : ""}`).join("")}</div></div>`).join("")}
+      <div class="run-group"><div class="run-group-h"><b>Run</b><div class="small muted">stages always run in the order shown above, whatever order you tick them</div></div></div>
+      <div class="run-test"><label><input type="checkbox" id="run-test"> Test run: only the first <input id="run-mins" type="number" min="1" value="2" style="width:4.5em"> minutes of the game</label>
+        <span class="small muted">Results go to separate test files, so your real results are never touched.</span></div>
+      <div class="run-test" id="run-stale-row" hidden><label><input type="checkbox" id="run-allow-stale"> <b>Run anyway</b> even though an earlier step is out of date <span class="small muted">(the results may not match each other)</span></label></div>
       <div class="run-reports"><b>Reports for this game</b> <span class="small muted">(PDFs, text files and review-sheet spreadsheets in the game's reports folder; click to open)</span><div id="rep-list" class="small"></div></div>`;
 
   const stage = isNew ? "" : `
@@ -296,15 +308,16 @@ async function gamePage(id) {
     ${isNew ? "" : `<div style="margin-bottom:12px">${statusChips(g)}</div>`}
     <div id="msgs"></div>
     ${stage}
+    ${isNew ? "" : `<p class="sec-order small muted">Work down the numbered sections: <b>1</b> match, <b>2</b> video files, <b>3</b> timings, <b>4</b> pitch calibration, then <b>5</b> run.</p>`}
     <div class="sec-tools"><button type="button" class="link" id="sec-open">Expand all</button><button type="button" class="link" id="sec-close">Collapse all</button></div>
     <form id="form" autocomplete="off">
-      ${sec("match", "Match", matchBody, isNew)}
-      ${sec("video", "Video files", videoBody, isNew)}
-      ${sec("timings", "Timings &amp; exclusions", timingsBody, isNew)}
+      ${sec("match", "Match", matchBody, isNew, 1)}
+      ${sec("video", "Video files", videoBody, isNew, 2)}
+      ${sec("timings", "Timings &amp; exclusions", timingsBody, isNew, 3)}
     </form>
-    ${isNew ? `<details class="sec" open><summary><span class="sec-title">Pitch calibration</span><span class="sec-sum">Save the game first, then add its pitch calibration here.</span></summary></details>`
-      : `<details class="sec" data-sec="cal" id="cal-card" ${secOpen("cal", false) ? "open" : ""}><summary><span class="sec-title">Pitch calibration</span><span class="sec-sum" id="sum-cal"></span><a class="btn primary sec-act" id="sum-act" href="/calibrator?game=${g.game_id}">Calibrate pitch</a></summary><div class="sec-body" id="cal-body"></div></details>
-         <details class="sec" data-sec="run" id="run-card" ${secOpen("run", false) ? "open" : ""}><summary><span class="sec-title">Run</span><span class="sec-sum" id="sum-run">detections, reports and the annotated video</span></summary><div class="sec-body">${runBody}</div></details>
+    ${isNew ? `<details class="sec" open><summary>${secNum(4)}<span class="sec-title">Pitch calibration</span><span class="sec-sum">Save the game first, then add its pitch calibration here.</span></summary></details>`
+      : `<details class="sec" data-sec="cal" id="cal-card" ${secOpen("cal", false) ? "open" : ""}><summary>${secNum(4)}<span class="sec-title">Pitch calibration</span><span class="sec-sum" id="sum-cal"></span><a class="btn primary sec-act" id="sum-act" href="/calibrator?game=${g.game_id}">Calibrate pitch</a></summary><div class="sec-body" id="cal-body"></div></details>
+         <details class="sec" data-sec="run" id="run-card" ${secOpen("run", false) ? "open" : ""}><summary>${secNum(5)}<span class="sec-title">Run</span><span class="sec-sum" id="sum-run">detections, reports and the annotated video</span><span class="sec-btns" onclick="event.preventDefault()"><button type="button" class="primary" id="run-go">Run</button><button type="button" class="danger" id="run-stop" disabled>Stop</button><button type="button" id="run-hide" class="has-tip tip-right" data-tip="Hide or show the run output window. Hiding it does not stop a run.">Hide window</button><button type="button" id="run-max" class="has-tip tip-right" data-tip="Fill the browser window with the run output (Esc to go back).">Full window</button></span></summary><div class="sec-body">${runBody}</div></details>
          <details class="sec" data-sec="rec" ${secOpen("rec", false) ? "open" : ""} id="rec-details"><summary><span class="sec-title">What the pipeline is given</span><span class="sec-sum">the exact record for this game</span></summary><div class="sec-body"><pre class="rec" id="rec">Loading...</pre></div></details>`}`;
 
   const $ = id => document.getElementById(id);
@@ -480,6 +493,7 @@ const RUN_STEPS = [
   ["detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"],
   ["match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"],
   ["opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"],
+  ["player_positions", "Player positions", "saves the named players' positions (your Identity tags resolved with fixed rules) as NNNN_players.db in the game's data folder, with quality checks and a list of tags that disagree; run it after tagging; agents and analysts read this file"],
   ["player_report", "Player report", "PDF: distance, max speed and pitch dots coloured by possession — pick one named player or a whole team"],
   ["annotation", "Annotated video", "the video with detections drawn on it"],
   ["team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"],
@@ -487,6 +501,15 @@ const RUN_STEPS = [
   ["youtube_description", "YouTube description", "a .txt to paste into the YouTube description box: teams, date, the game's description, the start / half-time / end times and the goal estimates (build-up, goal, restart) as click-able time stamps; uses the Goal detection result (runs it first if there is none)"],
   ["ball_images", "Ball training images", "40 full frames picked where the ball detector is weak (ball lost, at the pitch edge, big and close to the camera, false balls, unsure, tiny, fast) saved in the game's ball-images folder, to label and upload to Roboflow"],
   ["broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"],
+];
+// how the stages are grouped on the Run panel (the order inside the pipeline is fixed by the server, see runner.STEPS)
+const RUN_GROUPS = [
+  ["A. Find the players and the goals", "start here: the long stage, then the calculations on its results", ["detections", "transformations", "goal_detection"]],
+  ["B. Check the detections", "how well did the detector do, and what to fix first", ["detection_report"]],
+  ["C. Team reports", "need Transformations", ["match_report", "opposition_report"]],
+  ["D. Named players", "name the players on Track Players first; Player positions is saved before the Player report reads it", ["player_positions", "player_report"]],
+  ["E. Video and description", "need Transformations; the YouTube description uses the Goal detection result in part A", ["annotation", "youtube_description"]],
+  ["F. Training images", "for retraining the models in Roboflow", ["team_images", "ball_images", "broadcast_pitch_images"]],
 ];
 let runTimer = null;
 
@@ -502,6 +525,41 @@ function setupRunPanel(g) {
     } catch (e) { box.innerHTML = '<span class="muted">Not available (is the data folder connected?).</span>'; }
   };
   loadReports();
+  const showConsole = on => {
+    const w = $("run-console-wrap"), b = $("run-hide"); if (!w) return;
+    w.hidden = !on; if (b) b.textContent = on ? "Hide window" : "Show window";
+  };
+  $("run-hide").onclick = () => { const w = $("run-console-wrap"); if (w.hidden) { $("run-card").open = true; secSave("run", true); } showConsole(w.hidden); };
+  let stepState = {}, tagCount = 0;
+  const STEP_LABEL = { done: "Done", stale: "Out of date", interrupted: "Interrupted", running: "Running", not_run: "Not run" };
+  const loadStepState = async () => {
+    try {
+      const r = await api("GET", `/api/games/${g.game_id}/run-status`);
+      stepState = r.steps || {}; tagCount = r.tags || 0;
+    } catch (e) { return; }
+    document.querySelectorAll("[data-chip]").forEach(chip => {
+      const st = stepState[chip.dataset.chip];
+      if (!st || st.state === "unknown") { chip.hidden = true; return; }
+      const cls = { done: "ok", stale: "warn", interrupted: "bad", running: "info", not_run: "" }[st.state] || "";
+      chip.className = "chip " + cls;
+      chip.textContent = (STEP_LABEL[st.state] || st.state) + (st.state === "done" && st.at ? " " + st.at.slice(5, 16) : "");
+      chip.title = (st.reasons || []).join("; ") || (st.state === "not_run" ? "Not run yet for this game" : "");
+      chip.hidden = st.state === "not_run" && !["detections", "transformations", "player_positions"].includes(chip.dataset.chip);
+    });
+    syncAutoTicks();
+  };
+  // a named Player report needs current Player positions: tick it for the person (the server also adds it if forgotten)
+  const syncAutoTicks = () => {
+    const rep = document.querySelector('[data-step="player_report"]'), pos = document.querySelector('[data-step="player_positions"]');
+    if (!rep || !pos || !rep.checked || pos.checked || pos.disabled) return;
+    const tgt = ($("run-player-report") && $("run-player-report").value) || "named";
+    const named = tgt === "named" || tgt.startsWith("roster:");
+    const ps = stepState.player_positions;
+    if (named && tagCount > 0 && ps && ps.state !== "done") { pos.checked = true; toast("Player positions ticked: the Player report reads it and it is " + (ps.state === "stale" ? "out of date" : "not built yet")); }
+  };
+  document.addEventListener("change", e => { if (e.target && e.target.dataset && e.target.dataset.step === "player_report") syncAutoTicks(); });
+  loadStepState();
+  document.addEventListener("gl-run-finished", loadStepState);
   if (window.glRepDone) document.removeEventListener("gl-run-finished", window.glRepDone);
   window.glRepDone = loadReports;
   document.addEventListener("gl-run-finished", window.glRepDone);
@@ -614,7 +672,7 @@ function setupRunPanel(g) {
       if (location.hash !== "#/game/" + g.game_id) return;
       const mine = st && st.game_id === g.game_id;
       if (mine) {
-        if (shownRun !== st.id) { reset(); shownRun = st.id; }
+        if (shownRun !== st.id) { reset(); shownRun = st.id; if (st.status === "running") showConsole(true); }
         const first = offset === 0 && lines.length === 0;
         const r = await api("GET", `/api/run/log?offset=${offset}${first ? "&tail=true" : ""}`);
         if (r.run && r.run.id === st.id) { offset = r.offset; if (r.text) feed(r.text); }
@@ -643,6 +701,7 @@ function setupRunPanel(g) {
     const steps = [...document.querySelectorAll("[data-step]:checked")].map(el => el.dataset.step);
     try { localStorage.setItem("gl-run-steps", JSON.stringify(steps)); } catch (e) { /* ignore */ }
     const body = { steps };
+    if ($("run-allow-stale") && $("run-allow-stale").checked) body.allow_stale = true;
     if ($("run-test").checked) body.duration_s = Math.max(1, Math.round(parseFloat($("run-mins").value || "2") * 60));
     if (steps.includes("annotation")) {
       const bg = ($("run-annotate-bg") && $("run-annotate-bg").value) || "analysis";
@@ -660,9 +719,18 @@ function setupRunPanel(g) {
     try {
       const r = await api("POST", `/api/games/${g.game_id}/run`, body);
       mode = "current"; $("run-back").hidden = true; reset(); shownRun = r.run.id; lastStatus = "running";
-      $("run-console").textContent = "Starting..."; $("run-card").open = true;
+      if ($("run-stale-row")) { $("run-stale-row").hidden = true; $("run-allow-stale").checked = false; }
+      (r.run.notes || []).forEach(n => toast(n));
+      setTimeout(loadStepState, 3000);
+      $("run-console").textContent = "Starting..."; $("run-card").open = true; showConsole(true);
       pollOnce();
-    } catch (e) { $("run-msg").innerHTML = notice("bad", "Not started:", e.errors || [e.message]); }
+    } catch (e) {
+      const errs = e.errors || [e.message];
+      $("run-msg").innerHTML = notice("bad", "Not started:", errs);
+      $("run-card").open = true;
+      if ($("run-stale-row") && errs.some(x => /out of date/.test(x))) $("run-stale-row").hidden = false;
+      loadStepState();
+    }
   };
   $("run-stop").onclick = async () => {
     if (!confirm("Stop the run? Whatever the current stage has not finished will be lost; stages that completed are kept.")) return;
@@ -672,7 +740,7 @@ function setupRunPanel(g) {
     const id = $("run-past").value; if (!id) return;
     try {
       const r = await api("GET", `/api/games/${g.game_id}/runs/${encodeURIComponent(id)}/log?tail=true`);
-      mode = "old"; reset(); feed(r.text); paint(); $("run-back").hidden = false;
+      mode = "old"; reset(); feed(r.text); paint(); $("run-back").hidden = false; showConsole(true);
       $("run-line").textContent = "Showing the end of an earlier run's log.";
     } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
   };
@@ -682,10 +750,10 @@ function setupRunPanel(g) {
   const maxView = on => {
     const v = $("run-view"); if (!v) return;
     v.classList.toggle("max", on); document.body.classList.toggle("run-max-open", on);
-    $("run-max").textContent = on ? "Close full window" : "Full window";
     const pre = $("run-console"); if (on || $("run-follow").checked) pre.scrollTop = pre.scrollHeight;
   };
-  $("run-max").onclick = () => maxView(!$("run-view").classList.contains("max"));
+  $("run-max").onclick = () => { $("run-card").open = true; secSave("run", true); showConsole(true); maxView(true); };
+  $("run-max-close").onclick = () => maxView(false);
   $("run-stop2").onclick = () => $("run-stop").click();
   new MutationObserver(() => { const b = $("run-stop2"); if (b) b.disabled = $("run-stop").disabled; })
     .observe($("run-stop"), { attributes: true, attributeFilter: ["disabled"] });
@@ -896,7 +964,7 @@ async function identityPage(gameId) {
   const navBack = document.getElementById("nav-back");
   if (navBack) { navBack.href = `#/game/${gameId}`; navBack.textContent = "← Game " + gameId; }
   document.getElementById("nav-title").textContent = `Track Players · ${data.title || ("Game " + gameId)}`;
-  document.getElementById("nav-actions").innerHTML = `<a class="gl-btn" href="#/game/${gameId}">Back to game</a>`;
+  document.getElementById("nav-actions").innerHTML = `<button type="button" class="gl-btn danger has-tip tip-right" id="id-reset" disabled data-tip="Start again: deletes every tag on this game. A copy of the tags is saved in the game's data folder first, and positions played and the formation are kept. Greyed out when there are no tags.">Start again</button> <button type="button" class="gl-btn has-tip tip-right" id="id-build" disabled data-tip="Takes your saved tags, applies the fixed rules (one box per person per frame, overlaps resolved) and saves the clean result as the game's players file, which the reports and analysts read. Your tags are not changed. Greyed out until a player is named.">Export and Build</button> <a class="gl-btn has-tip tip-right" href="#/game/${gameId}" data-tip="Back to the game page. Everything you have tagged is already saved.">Back to game</a>`;
 
   const analysisOk = !!(data.videos && data.videos.analysis && data.videos.analysis.exists);
   const startT = data.game_start_s != null ? data.game_start_s : 0;
@@ -908,12 +976,7 @@ async function identityPage(gameId) {
     ${!analysisOk ? notice("bad", "No analysis video", ["Add the analysis video on the game page — boxes are in that camera."]) : ""}
     <div class="id-layout">
       <section class="id-stage card">
-        <div class="id-video-wrap" id="id-video-wrap">
-          <div class="id-zoom-stage" id="id-zoom-stage">
-            <video id="id-pv" controls preload="metadata" playsinline></video>
-            <canvas id="id-cv"></canvas>
-          </div>
-        </div>
+        <p class="muted small" style="margin:0 0 2px">Click a box to name that track (or right-click for a quick name list). When tracking breaks, click the new box and pick the same person again. Format: <b>${esc(data.game_format || "—")}</b> · roster shows ${esc(data.game_format === "womens" ? "women (+ both)" : data.game_format === "mens" ? "men (+ both)" : "all Polis players")}.</p>
         <div class="row id-controls">
           <span class="id-time" id="id-cur">00:00</span>
           <button type="button" data-iskip="-5">−5s</button>
@@ -932,11 +995,20 @@ async function identityPage(gameId) {
           </label>
           <span class="small muted" id="id-frame-meta"></span>
         </div>
-        <p class="muted small" style="margin:10px 0 0">Click a box to name that track (or right-click for a quick name list). When tracking breaks, click the new box and pick the same person again. Format: <b>${esc(data.game_format || "—")}</b> · roster shows ${esc(data.game_format === "womens" ? "women (+ both)" : data.game_format === "mens" ? "men (+ both)" : "all Polis players")}.</p>
+        <div class="id-video-wrap" id="id-video-wrap">
+          <div class="id-zoom-stage" id="id-zoom-stage">
+            <video id="id-pv" controls preload="metadata" playsinline></video>
+            <canvas id="id-cv"></canvas>
+          </div>
+        </div>
       </section>
       <aside class="id-side">
-        <div class="card">
-          <h2 style="margin-top:0">Assign</h2>
+        <details class="card id-fold" id="id-roles-card" ${secOpen("idroles", true) ? "open" : ""}>
+          <summary><h2 style="margin:0">Positions in this game</h2></summary>
+          <p class="muted small" style="margin:6px 0">Right-click a box on the video to name a player. Positions are recorded for the analysts; nothing uses them yet.</p>
+          <div id="id-roles" class="small muted">Loading…</div>
+        </details>
+        <div id="id-assign-legacy" hidden>
           <div id="id-pick" class="muted small">Click a detection box on the video.</div>
           <div id="id-roster-wrap" hidden>
             <p class="small" style="margin:10px 0 6px"><b id="id-pick-label"></b></p>
@@ -945,17 +1017,21 @@ async function identityPage(gameId) {
             <button type="button" class="link danger" id="id-clear" style="margin-top:8px" hidden>Clear name on this track</button>
           </div>
         </div>
-        <div class="card id-asg-card">
-          <div class="row spread id-asg-head" style="align-items:baseline;gap:8px">
-            <h2 style="margin:0">Named so far <span class="muted small" id="id-asg-count"></span></h2>
-            <span class="row" style="gap:6px;flex-wrap:nowrap">
-              <button type="button" id="id-prev-break" hidden>Prev break</button>
-              <button type="button" class="primary" id="id-next-break" hidden>Next break</button>
-            </span>
+        <details class="card id-fold id-acc" id="id-asg-fold" ${idAccOpen() === "asg" ? "open" : ""}>
+          <summary><h2 style="margin:0">Player tracking <span class="muted small" id="id-asg-count"></span></h2>
+            <span class="row" style="gap:6px;flex-wrap:nowrap;margin-left:auto" onclick="event.preventDefault()">
+              <button type="button" class="has-tip tip-right" id="id-prev-break" hidden data-tip="Jump back to the previous break: a place where a named player's track is lost. The number is the breaks still to fix.">Prev break</button>
+              <button type="button" class="primary has-tip tip-right" id="id-next-break" hidden data-tip="Jump to the next break: a place where a named player's track is lost. Click the new box and name the same person again, or press Skip.">Next break</button>
+            </span></summary>
+          <div class="id-acc-body">
+            <p class="muted small" id="id-break-hint" hidden style="margin:6px 0">Jump to where a named track is lost, then click the new box and assign the same person.</p>
+            <div id="id-assignments" class="id-asg-list muted small">None yet.</div>
           </div>
-          <p class="muted small" id="id-break-hint" hidden>Jump to where a named track is lost, then click the new box and assign the same person.</p>
-          <div id="id-assignments" class="id-asg-list muted small">None yet.</div>
-        </div>
+        </details>
+        <details class="card id-fold id-acc" id="id-health-card" ${idAccOpen() === "health" ? "open" : ""}>
+          <summary><h2 style="margin:0">Quality</h2><span id="id-health-actions" class="row" style="gap:6px;margin-left:auto" onclick="event.preventDefault()"></span></summary>
+          <div id="id-health" class="small muted id-acc-body" style="margin-top:6px">Checking…</div>
+        </details>
       </aside>
     </div>
     <div id="id-ctx" class="id-ctx" hidden></div>
@@ -1001,16 +1077,165 @@ async function identityPage(gameId) {
     const n = breaks.length;
     if (nextBtn) {
       nextBtn.hidden = !n;
-      nextBtn.textContent = n ? `Next break (${n})` : "Next break";
+      nextBtn.innerHTML = n ? `Next break <span class="badge-n">${n}</span>` : "Next break";
+      nextBtn.dataset.tip = n ? `${n} break${n === 1 ? "" : "s"} still to fix. Jumps to the next place a named player's track is lost; click the new box and name the same person again, or press Skip.` : "Jump to the next break.";
     }
     if (prevBtn) {
       prevBtn.hidden = !n;
-      prevBtn.textContent = n ? `Prev break (${n})` : "Prev break";
+      prevBtn.innerHTML = n ? `Prev break <span class="badge-n">${n}</span>` : "Prev break";
     }
     if (hint) hint.hidden = !n;
     renderAssignments();
   };
 
+  // ---- positions played (per half) and formation (per half)
+  let extraRoleIds = [];
+  const refreshRoles = async () => {
+    const box = document.getElementById("id-roles"); if (!box) return;
+    let r;
+    try { r = await api("GET", `/api/games/${gameId}/identity/roles`); }
+    catch (e) { box.textContent = "Positions are not available."; return; }
+    const listed = new Set(r.players.map(p => p.roster_player_id));
+    const rows = r.players.concat(extraRoleIds.filter(id => !listed.has(id)).map(id => {
+      const pl = roster.find(x => x.player_id === id) || {};
+      return { roster_player_id: id, name: pl.name || ("Player " + id), tagged: false, h1: null, h2: null, note1: null, note2: null };
+    }));
+    const sel = (cur, attrs, blank) => `<select ${attrs}><option value="">${blank}</option>${r.positions.map(v => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    const fsel = (cur, half, blank) => `<select data-fm="${half}"><option value="">${blank}</option>${r.formations.map(v => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    const addable = roster.filter(x => !rows.some(p => p.roster_player_id === x.player_id));
+    box.className = "small";
+    box.innerHTML = `
+      <div class="id-roles-grid id-roles-head"><span>Formation</span>${fsel(r.formation["1"], 1, "1st half…")}${fsel(r.formation["2"], 2, "Same as 1st")}</div>
+      ${rows.length ? `<div class="id-roles-grid id-roles-head" style="margin-top:6px"><span class="muted">Player</span><span class="muted">1st half</span><span class="muted">2nd half</span></div>` : `<span class="muted">Name a player on the video, or add one below.</span>`}
+      ${rows.map(p => `<div class="id-roles-grid">
+          <span title="${esc(p.name)}${p.tagged ? "" : " (not tagged in this game)"}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}
+            <button type="button" class="link" data-note="${p.roster_player_id}" title="${esc((p.note1 || p.note2) ? "Note: " + (p.note1 || p.note2) : "Add a note")}">${(p.note1 || p.note2) ? "✎•" : "✎"}</button>${p.tagged ? "" : `<button type="button" class="link danger" data-rm="${p.roster_player_id}" title="Remove from this list">×</button>`}</span>
+          ${sel(p.h1, `data-rid="${p.roster_player_id}" data-half="1"`, "—")}
+          ${sel(p.h2, `data-rid="${p.roster_player_id}" data-half="2"`, "Same as 1st")}
+        </div>`).join("")}
+      ${addable.length ? `<div class="row" style="gap:6px;margin-top:8px"><select id="id-role-add" style="flex:1"><option value="">Add a player not tagged…</option>${addable.map(x => `<option value="${x.player_id}">${esc(x.name)}</option>`).join("")}</select></div>` : ""}`;
+    const fail = e => toast((e.errors || [e.message]).join(" "), true);
+    box.querySelectorAll("select[data-rid]").forEach(el => el.onchange = async () => {
+      const p = rows.find(x => x.roster_player_id === +el.dataset.rid);
+      const half = +el.dataset.half;
+      try { await api("PUT", `/api/games/${gameId}/identity/roles/${el.dataset.rid}`, { half, position: el.value, note: half === 1 ? p.note1 : p.note2 }); toast("Saved"); refreshRoles(); } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("select[data-fm]").forEach(el => el.onchange = async () => {
+      try { await api("PUT", `/api/games/${gameId}/identity/formation`, { half: +el.dataset.fm, formation: el.value }); toast("Saved"); } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("[data-note]").forEach(b => b.onclick = async () => {
+      const p = rows.find(x => x.roster_player_id === +b.dataset.note);
+      const cur = p.note1 || p.note2 || "";
+      const txt = prompt(`Note for ${p.name} in this game (e.g. swapped wings after 10 minutes):`, cur);
+      if (txt === null) return;
+      try {
+        for (const [half, pos] of [[1, p.h1], [2, p.h2]]) if (pos) await api("PUT", `/api/games/${gameId}/identity/roles/${p.roster_player_id}`, { half, position: pos, note: txt });
+        if (!p.h1 && !p.h2) toast("Choose a position first, then add the note", true); else { toast("Saved"); refreshRoles(); }
+      } catch (e) { fail(e); }
+    });
+    box.querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+      extraRoleIds = extraRoleIds.filter(id => id !== +b.dataset.rm);
+      try { await api("DELETE", `/api/games/${gameId}/identity/roles/${b.dataset.rm}`); refreshRoles(); } catch (e) { fail(e); }
+    });
+    const add = document.getElementById("id-role-add");
+    if (add) add.onchange = () => { if (add.value) { extraRoleIds.push(+add.value); refreshRoles(); } };
+  };
+
+  // ---- quality: saved-positions state, coverage, problems with jump-to times, tidy, stale-ids banner
+  let recentWarnings = [], healthTimer = null, showAllIssues = false;
+  const jumpTo = t => { closeCtx(); pv.pause(); pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, t)); selectedTrack = null; };
+  const refreshHealth = async () => {
+    const box = document.getElementById("id-health"); if (!box) return;
+    let h;
+    try { h = await api("GET", `/api/games/${gameId}/identity/health`); }
+    catch (e) { box.textContent = "Quality check is not available."; return; }
+    const building = h.build && h.build.running;
+    const pos = h.positions || {};
+    const bits = [];
+    if (h.fingerprint && h.fingerprint.matches === false) {
+      bits.push(`<div class="notice bad"><b>Player ids have changed</b><ul><li>${esc(h.fingerprint.message)}</li></ul>
+        <button type="button" class="link" id="id-fp-accept">I have checked: the tags are right for these ids</button></div>`);
+    }
+    if (recentWarnings.length) {
+      bits.push(`<div class="notice warn"><b>Just now</b><ul>${recentWarnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>
+        <button type="button" class="link" id="id-warn-clear">Dismiss</button></div>`);
+    }
+    bits.push(!pos.exists
+      ? `<span class="chip warn">Positions not built</span>`
+      : (pos.current ? `<span class="chip ok">Positions up to date</span> <span class="muted">built ${esc(pos.built_at || "")}</span>`
+                     : `<span class="chip warn">Positions out of date</span> <span class="muted">built ${esc(pos.built_at || "")}</span>`));
+    if (h.build && h.build.error) bits.push(`<div class="notice bad"><b>Build failed</b><ul><li>${esc(h.build.error)}</li></ul></div>`);
+    if (h.players && h.players.length) {
+      bits.push(`<div style="margin-top:6px">${h.players.map(p => {
+        const c = k => (p.halves[k] ? p.halves[k].coverage_pct : null);
+        const low = [c("1"), c("2")].some(v => v != null && v < 60);
+        const f = v => (v == null ? "–" : Math.round(v) + "%");
+        return `<span class="chip ${low ? "warn" : "ok"}" title="Share of each half where this player is followed by a box">${esc(p.name.split(" ")[0])} ${f(c("1"))} / ${f(c("2"))}</span>`;
+      }).join("")}</div>`);
+    }
+    const issues = (h.issues || []).filter(i => i.kind !== "stale" && i.kind !== "ids_changed" && i.kind !== "no_positions");
+    const stateIssues = (h.issues || []).filter(i => ["stale", "no_positions"].includes(i.kind));
+    stateIssues.forEach(i => bits.push(`<div class="small" style="margin-top:6px">${esc(i.text)}</div>`));
+    if (issues.length) {
+      const shown = showAllIssues ? issues : issues.slice(0, 6);
+      bits.push(`<div style="margin-top:8px"><b>Problems (${issues.length})</b></div>` + shown.map(i => `
+        <div class="small" style="display:flex;gap:6px;align-items:baseline;margin-top:4px">
+          <span class="chip ${i.severity === "bad" ? "bad" : (i.severity === "warn" ? "warn" : "info")}">${i.severity === "bad" ? "Check" : (i.severity === "warn" ? "Warn" : "Note")}</span>
+          <span style="flex:1">${esc(i.text)}</span>
+          ${i.seek_t != null ? `<button type="button" class="link" data-jump="${i.seek_t}">Go</button>` : ""}
+        </div>`).join("") +
+        (issues.length > 6 ? `<button type="button" class="link" id="id-issues-more" style="margin-top:4px">${showAllIssues ? "Show fewer" : "Show all " + issues.length}</button>` : ""));
+    } else if (pos.exists && pos.current) {
+      bits.push(`<div class="small" style="margin-top:6px">No problems found.</div>`);
+    }
+    box.className = "small id-acc-body";
+    box.innerHTML = bits.join("");
+    const actions = document.getElementById("id-health-actions");
+    const nb = document.getElementById("id-build");
+    if (nb) { nb.disabled = !!(building || !h.tags); nb.textContent = building ? "Building…" : "Export and Build"; }
+    const rb = document.getElementById("id-reset");
+    if (rb) {
+      rb.disabled = !h.tags;
+      rb.onclick = async () => {
+        const people = new Set(assignments.map(a => a.roster_player_id)).size;
+        if (!confirm(`Delete ALL ${h.tags} tags (${people} player${people === 1 ? "" : "s"}) on this game and start again?\n\nA copy of the tags is saved in the game's data folder first. Positions played and the formation are kept. The saved positions file will show as out of date.`)) return;
+        try {
+          const r = await api("POST", `/api/games/${gameId}/identity/reset`);
+          toast(`Deleted ${r.deleted} tags (copy: ${r.saved_to})`);
+          assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+          selectedTrack = null; recentWarnings = [];
+          await refreshBreaks(); await refreshBoxes(true); refreshRoles(); refreshHealth();
+        } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+      };
+    }
+    actions.innerHTML = (h.tidy_candidates ? `<button type="button" id="id-tidy" class="has-tip tip-right" data-tip="Deletes the tags the last build found redundant (their frames are already covered by other tags), so they change nothing in the result. A copy is saved first; build again afterwards.">Tidy ${h.tidy_candidates}</button>` : "");
+    box.querySelectorAll("[data-jump]").forEach(b => b.onclick = () => jumpTo(parseFloat(b.dataset.jump)));
+    const more = document.getElementById("id-issues-more"); if (more) more.onclick = () => { showAllIssues = !showAllIssues; refreshHealth(); };
+    const fp = document.getElementById("id-fp-accept");
+    if (fp) fp.onclick = async () => { try { await api("POST", `/api/games/${gameId}/identity/fingerprint/accept`); toast("Recorded"); refreshHealth(); } catch (e) { toast((e.errors || [e.message]).join(" "), true); } };
+    const wc = document.getElementById("id-warn-clear"); if (wc) wc.onclick = () => { recentWarnings = []; refreshHealth(); };
+    const bb = document.getElementById("id-build");
+    if (bb) bb.onclick = async () => {
+      try { const r = await api("POST", `/api/games/${gameId}/identity/build-positions`); toast(r.message || "Building…"); } catch (e) { toast((e.errors || [e.message]).join(" "), true); return; }
+      refreshHealth();
+    };
+    const tb = document.getElementById("id-tidy");
+    if (tb) tb.onclick = async () => {
+      try {
+        const dry = await api("POST", `/api/games/${gameId}/identity/tidy`, { dry_run: true });
+        if (!dry.count) { toast("Nothing to tidy"); return; }
+        if (!confirm(`Delete ${dry.count} tags that change nothing in the result?\n\nA copy is saved in the game's data folder first. The saved positions need building again afterwards.`)) return;
+        const r = await api("POST", `/api/games/${gameId}/identity/tidy`, { dry_run: false });
+        toast(`Tidied ${r.count} tags (copy: ${r.saved_to})`);
+        assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
+        await refreshBreaks(); await refreshBoxes(true); refreshHealth();
+      } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
+    };
+    clearTimeout(healthTimer);
+    if (building) healthTimer = setTimeout(refreshHealth, 2500);
+  };
+
+  const openAsg = new Set();
   const renderAssignments = () => {
     document.getElementById("id-asg-count").textContent = assignments.length ? `(${assignments.length})` : "";
     if (!assignments.length) {
@@ -1027,15 +1252,24 @@ async function identityPage(gameId) {
       const name = segs[0].name;
       const rid = segs[0].roster_player_id;
       const br = breakForRoster(rid);
-      const bits = segs.map(s => `#${s.track_player_id} @f${s.from_frame}${s.to_frame == null ? "→" : "–" + s.to_frame}`).join(", ");
+      const vf = (data.detections && data.detections.video_fps) || 24;
+      const tm = f => fmtT(f / vf);
+      const nIds = new Set(segs.map(s => s.track_player_id)).size;
+      const isOpen = openAsg.has(rid);
+      const detail = segs.map(s => `<div class="id-seg"><b>#${s.track_player_id}</b> ${tm(s.from_frame)} – ${s.to_frame == null ? "open" : tm(s.to_frame)} <span class="muted">(f${s.from_frame}${s.to_frame == null ? "→" : "–" + s.to_frame})</span></div>`).join("");
       const breakBtns = br
         ? `<span class="row" style="gap:8px;flex-wrap:nowrap">
-             <button type="button" class="link" data-break="${rid}" title="Jump to where track #${br.track_player_id} is lost">Break @ ${fmtT(br.lost_at_t)}</button>
-             <button type="button" class="link" data-skip-break="${rid}" title="Player not visible / not detected — skip this break">Skip</button>
+             <button type="button" class="link has-tip tip-right" data-break="${rid}" data-tip="Jump to where track #${br.track_player_id} is lost, then click the new box and name this player again.">Break @ ${fmtT(br.lost_at_t)}</button>
+             <button type="button" class="link has-tip tip-right" data-skip-break="${rid}" data-tip="Skip this break: use it when the player is off camera or not detected, so there is no new box to click. A track that comes back later is kept; one that has ended is closed here.">Skip</button>
            </span>`
         : `<span class="chip ok">OK</span>`;
-      return `<div class="id-asg-row"><div class="row spread" style="gap:6px;align-items:baseline"><b>${esc(name)}</b>${breakBtns}</div><div class="muted">${esc(bits)}</div></div>`;
+      return `<div class="id-asg-row"><div class="row spread" style="gap:6px;align-items:baseline"><b>${esc(name)}</b>${breakBtns}</div>
+        <button type="button" class="chip info id-badge" data-asg="${rid}" aria-expanded="${isOpen}" title="Show or hide the track ids and times">${nIds} ${nIds === 1 ? "track id" : "track ids"} ${isOpen ? "▾" : "▸"}</button>
+        ${isOpen ? `<div class="id-segs small">${detail}</div>` : ""}</div>`;
     }).join("");
+    document.querySelectorAll("#id-assignments [data-asg]").forEach(btn => {
+      btn.onclick = () => { const r = +btn.dataset.asg; openAsg.has(r) ? openAsg.delete(r) : openAsg.add(r); renderAssignments(); };
+    });
     document.querySelectorAll("#id-assignments [data-break]").forEach(btn => {
       btn.onclick = () => jumpToBreak(breakForRoster(+btn.dataset.break));
     });
@@ -1120,10 +1354,13 @@ async function identityPage(gameId) {
       ctx.strokeStyle = named ? "#3fa56c" : (b.is_polis ? "#feca02" : "rgba(255,255,255,.55)");
       ctx.fillStyle = named ? "rgba(63,165,108,.18)" : (sel ? "rgba(254,202,2,.2)" : "rgba(0,0,0,.05)");
       ctx.fillRect(x, y, w, h);
+      ctx.setLineDash(b.dup_track ? [6, 4] : []);
       ctx.strokeRect(x, y, w, h);
-      const label = b.name
+      ctx.setLineDash([]);
+      const label0 = b.name
         ? `${b.name} #${b.track_player_id}`
         : (b.is_polis ? `P #${b.track_player_id}` : `#${b.track_player_id}`);
+      const label = (b.dup_track ? "2 boxes · " : "") + label0;
       ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
       const tw = ctx.measureText(label).width + 8;
       ctx.fillStyle = named ? "rgba(31,111,67,.92)" : "rgba(0,0,0,.75)";
@@ -1192,6 +1429,9 @@ async function identityPage(gameId) {
       assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
       await refreshBreaks();
       await refreshBoxes(true);
+      refreshRoles();
+      if (r.warnings && r.warnings.length) { recentWarnings = r.warnings.concat(recentWarnings).slice(0, 5); r.warnings.forEach(w => toast(w, true)); }
+      refreshHealth();
     } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
   };
 
@@ -1204,6 +1444,7 @@ async function identityPage(gameId) {
       assignments = await api("GET", `/api/games/${gameId}/identity/assignments`);
       await refreshBreaks();
       await refreshBoxes(true);
+      refreshHealth();
     } catch (e) { toast((e.errors || [e.message]).join(" "), true); }
   };
 
@@ -1328,6 +1569,12 @@ async function identityPage(gameId) {
     if (Math.abs(d) < 1) pv.pause();
     pv.currentTime = Math.max(0, Math.min(pv.duration || 1e9, pv.currentTime + d));
   });
+  { const d = document.getElementById("id-roles-card"); if (d) d.addEventListener("toggle", () => secSave("idroles", d.open)); }
+  // Player tracking and Quality are an accordion: opening one closes the other, and the open one takes all the spare height
+  { const asg = document.getElementById("id-asg-fold"), hl = document.getElementById("id-health-card");
+    const remember = v => { try { localStorage.setItem("gl-sec-idacc", v); } catch (e) { /* ignore */ } };
+    asg.addEventListener("toggle", () => { if (asg.open) { hl.open = false; remember("asg"); } else if (!hl.open) remember(""); });
+    hl.addEventListener("toggle", () => { if (hl.open) { asg.open = false; remember("health"); } else if (!asg.open) remember(""); }); }
   document.getElementById("id-filter").oninput = showPick;
   document.getElementById("id-clear").onclick = () => clearSelected();
 
@@ -1449,6 +1696,8 @@ async function identityPage(gameId) {
   document.addEventListener("keydown", keyHandler);
 
   refreshBreaks();
+  refreshHealth();
+  refreshRoles();
   showPick();
 }
 

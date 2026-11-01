@@ -513,6 +513,30 @@ def _to_attacking_coords(x, y, t, periods, team_index):
     return np.asarray(x, dtype=float) * d, np.asarray(y, dtype=float) * d, True
 
 
+def _saved_player_frames(game_id):
+    """Named-player rows from the saved NNNN_players.db (built or refreshed first if missing or out of date).
+
+    Returns (DataFrame with the columns the report code uses, note) or (None, reason) when the saved layer cannot be used."""
+    try:
+        from player_positions import build_player_positions, check_current, players_db_path
+        chk = check_current(game_id)
+        if not chk["current"]:
+            print("Player report: saved player positions are not current (" + "; ".join(chk["reasons"]) + ") - rebuilding them first.")
+            build_player_positions(game_id, verbose=False)
+        path = players_db_path(game_id)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            f = pd.read_sql(
+                "SELECT frame_id, t_video_s AS t, x_m AS x, y_m AS y, speed_kmh AS spd, team_final AS team, "
+                "source_track_id AS pid, has_ball, roster_player_id, class_name FROM clean_frames", conn)
+        finally:
+            conn.close()
+        f["has_ball"] = f["has_ball"].fillna(0).astype(bool)
+        return f, "saved player positions (" + (chk.get("built_at") or "just built") + ")"
+    except Exception as e:                                   # never lose the report because the saved layer failed
+        return None, f"saved player positions unavailable ({e}); used the live tags instead"
+
+
 def compute_player_reports(db_path, record, teams, target="named"):
     """Build metrics for each subject selected by `target`."""
     df, video_fps, det_fps, mapping = _load_detections(db_path, teams)
@@ -546,10 +570,20 @@ def compute_player_reports(db_path, record, teams, target="named"):
     subjects = resolve_subjects(db_path, record, target, players_teams)
     team_index = {tm: i for i, tm in enumerate(teams)}
 
+    saved, saved_note = (None, None)
+    if any(s.get("kind") == "roster" for s in subjects):
+        saved, saved_note = _saved_player_frames(record.get("game_id"))
+        print("Player report: " + saved_note)
+
     reports = []
     for sub in subjects:
-        g = _mask_segments(players_teams, sub["segments"])
-        if g.empty:
+        from_saved = False
+        if saved is not None and sub.get("kind") == "roster":
+            g = saved[saved["roster_player_id"] == sub["roster_player_id"]]
+            from_saved = True
+        else:
+            g = _mask_segments(players_teams, sub["segments"])
+        if not from_saved and g.empty:
             # named player might have segments but no inside-pitch points in range
             g = _mask_segments(players, sub["segments"])
         team = sub.get("team")
@@ -583,7 +617,10 @@ def compute_player_reports(db_path, record, teams, target="named"):
         # Each unique detection frame ≈ 1/det_fps seconds of “seen” time
         present_s = float(n_frames) / max(float(det_fps), 1e-6)
         coverage_pct = 100.0 * min(1.0, present_s / playable_s)
-        tracks = sorted({int(s["track_player_id"]) for s in sub["segments"]})
+        if from_saved:
+            tracks = sorted({int(t) for t in g["pid"].dropna().unique()})      # tracks actually used after the rules
+        else:
+            tracks = sorted({int(s["track_player_id"]) for s in sub["segments"]})
         accuracy = _accuracy_from_coverage(coverage_pct, len(tracks))
         # Span from first to last sighting (can be long even when sparse)
         tracked_span_s = float(g["t"].max() - g["t"].min()) if len(g) else 0.0
@@ -664,6 +701,7 @@ def compute_player_reports(db_path, record, teams, target="named"):
             "dots_in_own": _pack(in_own),
             "dots_out_own": _pack(out_own),
             "tracks": tracks,
+            "source": saved_note if from_saved else "live tags / detections",
         })
 
     # Team-level: ball entries into the final third while that team had possession

@@ -58,10 +58,22 @@ def start_run(game_id: int, body: dict, request: Request, conn=Depends(_get_conn
         meta = runner.start(conn, game_id, body.get("steps") or [], body.get("duration_s"),
                             annotate_background=body.get("annotate_background"),
                             annotate_edited_pitch=body.get("annotate_edited_pitch"),
-                            player_report_target=body.get("player_report_target"))
+                            player_report_target=body.get("player_report_target"),
+                            allow_stale=bool(body.get("allow_stale")))
     except paths.GameFolderError as e:
         raise repo.ValidationError(str(e))
     return {"run": _public(meta)}
+
+
+@router.get("/api/games/{game_id}/run-status")
+def game_run_status(game_id: int, conn=Depends(_get_conn)):
+    """Per step: done / stale / interrupted / not run, and what each step needs first (for the Run panel)."""
+    from . import run_status
+    if repo.get_game(conn, game_id, with_detail=False) is None:
+        raise HTTPException(404, "Game not found")
+    cur = runner.status()
+    live = bool(cur and cur.get("status") == "running" and cur.get("game_id") == game_id)
+    return {"steps": run_status.evaluate(game_id, live=live), "depends": run_status.DEPENDS, "tags": run_status.tag_count(conn, game_id)}
 
 
 @router.post("/api/run/stop")

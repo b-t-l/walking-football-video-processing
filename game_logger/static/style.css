@@ -149,7 +149,7 @@ body.run-max-open { overflow: hidden; }
 main:has(.id-layout) { max-width: none; padding: 6px 10px 8px; }
 .id-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) clamp(360px, 29vw, 480px);
   gap: 10px;
   align-items: stretch;
   height: calc(100vh - 68px);
@@ -213,7 +213,7 @@ main:has(.id-layout) { max-width: none; padding: 6px 10px 8px; }
   min-width: 0; min-height: 0; height: 100%; overflow: hidden;
 }
 .id-side > .card { margin-bottom: 0; flex: none; min-height: 0; }
-.id-side > .card:first-child { overflow: auto; max-height: 42%; }
+.id-side > details.card { overflow: auto; max-height: 36%; }
 .id-roster { display: flex; flex-direction: column; gap: 4px; max-height: min(28vh, 280px); overflow: auto; }
 .id-name { text-align: left; width: 100%; padding: 7px 10px; border: 1px solid var(--line); background: var(--card); border-radius: 6px; display: flex; justify-content: space-between; gap: 8px; }
 .id-name:hover { border-color: var(--brand); }
@@ -240,3 +240,68 @@ main:has(.id-layout) { max-width: none; padding: 6px 10px 8px; }
 .id-ctx-list { overflow: auto; display: flex; flex-direction: column; gap: 3px; flex: 1; min-height: 0; }
 .id-ctx-list .id-name { padding: 6px 8px; font-size: 13px; }
 .id-ctx-foot { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* numbered game-page sections and grouped run stages */
+.sec-num { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--brand); color: #fff; font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.sec-order { margin: 0 4px 8px; }
+.sec-title { min-width: 120px; }
+.run-group { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 10px; }
+.run-group:first-child { border-top: 0; margin-top: 8px; padding-top: 0; }
+.run-group-h { font-size: 14px; }
+.run-group .run-steps { margin-top: 6px; }
+
+/* small "i" with a hover / focus pop-up (Run stages) */
+.info-i { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; margin-left: 4px; border-radius: 50%; border: 1px solid var(--muted); color: var(--muted); font: italic 700 11px/1 Georgia, serif; cursor: help; vertical-align: middle; flex: none; }
+.info-i:hover, .info-i:focus { color: var(--brand); border-color: var(--brand); outline: none; }
+.info-i:hover::after, .info-i:focus::after { content: attr(data-tip); position: absolute; left: -8px; top: 24px; z-index: 50; width: 340px; max-width: 80vw; padding: 9px 12px; border-radius: 8px; background: #1d2b22; color: #eef4f0; font: 400 13px/1.4 system-ui, sans-serif; font-style: normal; white-space: normal; text-align: left; box-shadow: 0 6px 18px rgba(0,0,0,.28); pointer-events: none; }
+.run-step { align-items: center; }
+
+/* Run / Stop / Full window on the Run section header */
+.sec-btns { display: flex; gap: 8px; flex: none; margin-left: auto; }
+.sec-btns button { padding: 5px 12px; font-size: 13px; }
+.run-view:not(.max) #run-stop2, .run-view:not(.max) #run-max-close { display: none; }
+
+/* Track Players side panel: foldable cards, positions grid */
+.id-fold > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 8px; }
+.id-fold > summary::-webkit-details-marker { display: none; }
+.id-fold > summary::before { content: "\25B8"; color: var(--muted); transition: transform .15s; }
+.id-fold[open] > summary::before { transform: rotate(90deg); }
+.id-roles-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 6px; align-items: center; margin-bottom: 4px; }
+.id-roles-grid select { width: 100%; padding: 4px 6px; font-size: 12px; }
+.id-roles-head > span:first-child { font-weight: 600; }
+#id-build { background: var(--brand); color: var(--brand-ink); border: 1px solid var(--brand); font-weight: 600; }
+#id-build:hover:not(:disabled) { filter: brightness(1.08); }
+#id-build:disabled { opacity: .5; cursor: not-allowed; }
+
+/* accordion in the Track Players side panel: the open card takes the spare height and scrolls */
+.id-side > details.id-acc { max-height: none; overflow: hidden; flex: 0 0 auto; }
+.id-side > details.id-acc[open] { flex: 1 1 0; min-height: 0; overflow: auto; }
+.id-acc > summary { position: sticky; top: 0; background: var(--card); z-index: 1; padding-bottom: 4px; }
+.id-acc .id-asg-list { overflow: visible; }
+
+.id-badge { border: 0; cursor: pointer; margin: 3px 0 0; font-family: inherit; }
+.id-segs { margin: 4px 0 2px; padding-left: 8px; border-left: 2px solid var(--line); }
+.id-seg { padding: 1px 0; }
+#id-prev-break, #id-next-break { padding: 8px 10px; font-size: 12px; line-height: 1.4; }
+.badge-n { display: inline-block; min-width: 18px; padding: 0 6px; margin-left: 4px; border-radius: 99px; background: rgba(255,255,255,.28); font-size: 11px; font-weight: 700; line-height: 17px; text-align: center; }
+#id-prev-break .badge-n { background: var(--line); color: var(--text); }
+#id-reset { color: var(--bad); border: 1px solid var(--bad); background: transparent; }
+#id-reset:hover:not(:disabled) { background: var(--bad-soft); }
+#id-reset:disabled { opacity: .5; cursor: not-allowed; }
+
+/* rollover tooltips for buttons (any element with class has-tip and a data-tip); tip-right keeps the pop-up inside the window */
+.has-tip { position: relative; }
+.has-tip:hover::after, .has-tip:focus-visible::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; width: 300px; max-width: 80vw; padding: 9px 12px; border-radius: 8px; background: #1d2b22; color: #eef4f0; font: 400 13px/1.4 system-ui, sans-serif; text-align: left; white-space: normal; text-transform: none; letter-spacing: 0; box-shadow: 0 6px 18px rgba(0,0,0,.28); pointer-events: none; }
+.has-tip.tip-right:hover::after, .has-tip.tip-right:focus-visible::after { left: auto; right: 0; }
+
+/* Track Players: controls above the video, whole panel black */
+.id-stage { background: #000; border-color: #000; color: #e8eee9; }
+.id-stage .muted, .id-stage .small { color: #9aa59d; }
+.id-stage b { color: #e8eee9; }
+.id-stage .id-time { color: #fff; }
+.id-controls { padding: 2px 0 4px; }
+.id-stage button, .id-stage select { background: #1c1f1d; color: #e8eee9; border: 1px solid #3a403c; }
+.id-stage button:hover { border-color: var(--brand); }
+.id-stage button.link { background: transparent; border: 0; color: var(--brand); }
+.id-stage label { color: #cfd8d1; }
+.id-stage input[type=range] { accent-color: var(--brand); }

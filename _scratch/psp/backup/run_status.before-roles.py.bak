@@ -1,0 +1,284 @@
+"""Which pipeline steps have been run for a game, and is each one still valid?
+
+main.py writes a small record per step into <game folder>/data/NNNN_status.json as each step finishes. The Run panel and
+runner.start() read it back to
+  * show each step as done / out of date / interrupted / not run,
+  * refuse to start a step whose upstream step has not been run (or was interrupted, or is out of date), and
+  * add the cheap Player positions step automatically in front of a named Player report.
+
+The chain:  detections -> transformations -> player_positions -> player_report   (and the other reports hang off transformations).
+A step is OUT OF DATE when an upstream step finished after it, or is itself out of date. Player positions is also out of date when
+the Identity tags changed since it was built, or the detections database it was built from changed (player_positions.check_current).
+
+Games run before this module existed have no record: Detections / Transformations are then taken as 'unknown' (not blocking) when
+the detections database exists and shows stitched ids; Player positions is judged from its own saved file.
+Test runs (--duration) never write or read records: they use separate test files.
+"""
+import hashlib
+import json
+import os
+import sqlite3
+import tempfile
+import time
+
+from . import paths
+
+STEPS = [
+    ("detections", "Detections"),
+    ("transformations", "Transformations and statistics"),
+    ("detection_report", "Detection report"),
+    ("match_report", "Match report"),
+    ("opposition_report", "Opposition reports"),
+    ("player_positions", "Player positions"),
+    ("player_report", "Player report"),
+    ("annotation", "Annotated video"),
+    ("team_images", "Team training images"),
+    ("goal_detection", "Goal detection"),
+    ("youtube_description", "YouTube description"),
+    ("ball_images", "Ball training images"),
+    ("broadcast_pitch_images", "Broadcast Video Pitch Training Images"),
+]
+LABEL = dict(STEPS)
+DEPENDS = {
+    "transformations": ["detections"],
+    "detection_report": ["transformations"],
+    "match_report": ["transformations"],
+    "opposition_report": ["transformations"],
+    "player_positions": ["transformations"],
+    "player_report": ["player_positions"],
+    "annotation": ["transformations"],
+    "team_images": ["transformations"],
+    "goal_detection": ["transformations"],
+    "youtube_description": ["transformations"],
+    "ball_images": ["transformations"],
+}
+STAMP = "%Y-%m-%d %H:%M:%S"
+
+
+def now():
+    return time.strftime(STAMP)
+
+
+# ------------------------------------------------------------------------------------------ the record file
+
+def status_path(game_id):
+    folder = paths.game_folder(game_id)
+    if not folder:
+        return None
+    return os.path.join(folder, "data", f"{paths.prefix(game_id)}_status.json")
+
+
+def _read(game_id):
+    p = status_path(game_id)
+    if not p or not os.path.isfile(p):
+        return {"steps": {}}
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        d.setdefault("steps", {})
+        return d
+    except (OSError, ValueError):
+        return {"steps": {}}
+
+
+def _write(game_id, d):
+    p = status_path(game_id)
+    if not p:
+        return False
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=1)
+        os.replace(tmp, p)
+        return True
+    except OSError:
+        return False                                          # a record that cannot be written must never stop a run
+
+
+def mark_started(game_id, steps):
+    d = _read(game_id)
+    for s in steps:
+        d["steps"][s] = {"state": "running", "started": now()}
+    _write(game_id, d)
+
+
+def mark_done(game_id, step):
+    d = _read(game_id)
+    d["steps"][step] = {"state": "done", "at": now()}
+    _write(game_id, d)
+
+
+# ------------------------------------------------------------------------------------------ identity fingerprint
+
+_fp_cache = {}
+
+
+def chain_fingerprint(db_path):
+    """Hash of the stitched-id layout in the detections DB (each id with its row count and first / last frame).
+    Changes when detections, transformations or the stitcher are re-run in a way that changes ids; cached per file date."""
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    st = os.stat(db_path)
+    key = (db_path, st.st_mtime, st.st_size)
+    if key in _fp_cache:
+        return _fp_cache[key]
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=15)
+    try:
+        rows = conn.execute(
+            "SELECT player_id, COUNT(*), MIN(frame_id), MAX(frame_id) FROM detected_objects "
+            "WHERE class_name IN ('player','goalkeeper') GROUP BY player_id ORDER BY player_id").fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    h = hashlib.sha1(json.dumps(rows).encode()).hexdigest()
+    out = {"hash": h, "ids": len(rows), "mtime": st.st_mtime}
+    _fp_cache.clear()
+    _fp_cache[key] = out
+    return out
+
+
+def identity_fingerprint(game_id):
+    """{recorded, current, matches, message}: do the stitched ids still look like the ones the tags were made on?"""
+    cur = chain_fingerprint(paths.detections_db(game_id))
+    rec = _read(game_id).get("identity_fingerprint")
+    if not cur:
+        return {"recorded": rec, "current": None, "matches": None, "message": "No detections database to compare with."}
+    if not rec:
+        return {"recorded": None, "current": cur, "matches": None, "message": "Not recorded yet (it is recorded when you make the first tag)."}
+    ok = rec.get("hash") == cur["hash"]
+    return {"recorded": rec, "current": cur, "matches": ok,
+            "message": "" if ok else "The player ids in the detections database are NOT the ones your tags were made on "
+                                     "(Detections, Transformations or the stitcher were re-run). Tags may point at different people."}
+
+
+def record_identity_fingerprint(game_id, force=False):
+    d = _read(game_id)
+    if d.get("identity_fingerprint") and not force:
+        return False
+    cur = chain_fingerprint(paths.detections_db(game_id))
+    if not cur:
+        return False
+    d["identity_fingerprint"] = {"hash": cur["hash"], "ids": cur["ids"], "recorded_at": now()}
+    return _write(game_id, d)
+
+
+# ------------------------------------------------------------------------------------------ evaluation
+
+def tag_count(conn, game_id):
+    return conn.execute("SELECT COUNT(*) FROM identity_assignments WHERE game_id = ?", (game_id,)).fetchone()[0]
+
+
+def _has_stitched_ids(db_path):
+    try:
+        c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+        try:
+            return c.execute("SELECT 1 FROM detected_objects WHERE player_id IS NOT NULL LIMIT 1").fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.DatabaseError:
+        return False
+
+
+def evaluate(game_id, live=False):
+    """{step: {state, at, reasons[]}}. state: done | stale | interrupted | running | not_run | unknown.
+    `live` = a run for this game is going right now (so a 'running' record is real, not an interrupted one)."""
+    rec = _read(game_id)["steps"]
+    dbp = paths.detections_db(game_id)
+    db_exists = bool(dbp and os.path.isfile(dbp))
+    out = {}
+    for sid, _ in STEPS:
+        r = rec.get(sid) or {}
+        st, at, reasons = "not_run", None, []
+        if r.get("state") == "running":
+            st = "running" if live else "interrupted"
+            at = r.get("started")
+            if st == "interrupted":
+                reasons.append(f"a run started it at {at} and did not finish it")
+        elif r.get("state") == "done":
+            st, at = "done", r.get("at")
+        elif sid in ("detections", "transformations") and db_exists:
+            if sid == "detections" or _has_stitched_ids(dbp):
+                st = "unknown"
+        if sid == "player_positions":
+            try:
+                from player_positions import check_current, players_db_path
+                if os.path.isfile(players_db_path(game_id)):
+                    chk = check_current(game_id)
+                    if st not in ("running", "interrupted"):
+                        st, at, reasons = ("done" if chk["current"] else "stale"), chk.get("built_at"), list(chk["reasons"])
+            except Exception:                                   # noqa: BLE001 - never break the panel
+                pass
+        out[sid] = {"state": st, "at": at, "reasons": reasons}
+    for sid, _ in STEPS:                                        # STEPS is in dependency order
+        o = out[sid]
+        if o["state"] not in ("done", "unknown"):
+            continue
+        for p in DEPENDS.get(sid, []):
+            po = out[p]
+            if po["state"] == "stale":
+                o["state"] = "stale"
+                o["reasons"].append(f"{LABEL[p]} is out of date")
+            elif po["state"] == "interrupted":
+                o["state"] = "stale"
+                o["reasons"].append(f"{LABEL[p]} was interrupted")
+            elif po["state"] == "done" and o["at"] and po["at"] and po["at"] > o["at"] and o["state"] == "done":
+                o["state"] = "stale"
+                o["reasons"].append(f"{LABEL[p]} was run again at {po['at']}, after this step")
+    return out
+
+
+def gate(game_id, conn, steps, target=None, live=False):
+    """Check a requested set of steps. Returns {blockers[], stale[], add[], notes[]}.
+    blockers: cannot start (missing / interrupted upstream, no tags). stale: could start, but an upstream step is out of date
+    (the caller blocks unless the person chose to ignore it). add: steps to put in front automatically."""
+    sel = set(steps)
+    ev = evaluate(game_id, live=live)
+    blockers, stale, add, notes = [], [], [], []
+    tags = tag_count(conn, game_id)
+    wants_named = "player_report" in sel and (not target or target == "named" or str(target).startswith("roster:"))
+
+    if "player_positions" in sel or wants_named:
+        if tags == 0:
+            blockers.append("No players are named on Track Players for this game yet, so Player positions / a named Player report cannot run.")
+    if "player_report" in sel and "player_positions" not in sel and tags > 0 and ev["player_positions"]["state"] != "done":
+        add.append("player_positions")
+        notes.append("Player positions added in front of the Player report: " +
+                     ("it has not been built yet" if ev["player_positions"]["state"] == "not_run"
+                      else "the saved file is out of date (" + "; ".join(ev["player_positions"]["reasons"]) + ")"))
+        sel.add("player_positions")
+
+    for s in [x for x, _ in STEPS if x in sel]:
+        for p in DEPENDS.get(s, []):
+            if p in sel:
+                continue
+            po = ev[p]
+            if po["state"] in ("not_run", "interrupted"):
+                why = "has not been run yet" if po["state"] == "not_run" else "was interrupted (" + "; ".join(po["reasons"]) + ")"
+                blockers.append(f"{LABEL[s]} needs {LABEL[p]} first: it {why}. Tick {LABEL[p]} as well.")
+            elif po["state"] == "stale":
+                stale.append(f"{LABEL[s]} would use {LABEL[p]}, which is out of date: " + "; ".join(po["reasons"]) + f". Tick {LABEL[p]} as well, or choose 'Run anyway'.")
+            elif po["state"] == "running":
+                blockers.append(f"{LABEL[p]} is still running.")
+    if ("detections" in sel or "transformations" in sel) and tags:
+        notes.append(f"This run re-creates the stitched player ids. The {tags} Track Players tags on this game were made on the old ids; "
+                     "a copy of the tags is saved first, and Player positions will show as out of date until you check the tags again.")
+    return {"blockers": blockers, "stale": stale, "add": add, "notes": notes}
+
+
+def backup_tags(conn, game_id):
+    """Save the game's tags as JSON next to its data before ids are re-created. Returns the path or None."""
+    folder = paths.game_folder(game_id)
+    if not folder:
+        return None
+    rows = [dict(r) for r in conn.execute("SELECT * FROM identity_assignments WHERE game_id = ? ORDER BY id", (game_id,))]
+    if not rows:
+        return None
+    p = os.path.join(folder, "data", f"{paths.prefix(game_id)}_tags_backup_{time.strftime('%Y%m%d-%H%M%S')}.json")
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"game_id": game_id, "saved_at": now(), "assignments": rows}, f, indent=1)
+        return p
+    except OSError:
+        return None

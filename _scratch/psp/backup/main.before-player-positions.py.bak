@@ -1,0 +1,352 @@
+from data import CreateDatabase
+from video_annotator import CreateVideoAnnotated
+from reports import CreateDetectionsReport,CreateMatchReport,CreateOppositionReport,CreatePlayerReport
+from team_images import ExtractTeamImages
+from ball_images import ExtractBallImages
+from broadcast_pitch_images import ExtractBroadcastPitchImages
+from goal_detection import GoalDetection
+from youtube_description import YoutubeDescription
+from data import GetGameData
+from data.create_database import TEAM_MODEL_FILE
+from view_transformer import CreateViewTransformations
+from track_stitcher import TrackStitcher
+from keeper_zone import KeeperZone
+from speed_and_distance_db_updater import SpeedDistanceUpdater
+from posession_db_updater import BallPosessionUpdater
+from direction_of_play import DirectionOfPlay
+from utils import *
+from team_assigner import Teams
+import os
+
+from video_annotator import AnnotatedVideoProcessor
+
+def main():
+
+
+    ############################################################ VARIABLES:
+    GAME_ID = 22     # what game (id column) to process ?
+    GAME_SOURCE = 'database'   # where the game details come from: 'excel' = games-logger.xlsx, 'database' = the game logger app (python -m game_logger)
+
+    # def what to run: (manually adjust to suit )
+    RUN_DETECTIONS = False       # Run yolo detections for players/goalkeeper/pitch/ball and save to database
+    RUN_TRANSFORMATIONS = False  # calculate detection positions transformed to overhead view, team assignment, speed, distance 
+    RUN_DETECTIONS_REPORT = True   # run report to check how performance of detections/transformation
+    RUN_ANNOTATION_VIDEO_CREATOR = False  # create annotated video
+    RUN_TEAM_IMAGES = False  # save pictures of the players from 10 random frames, sorted by what the team model says (to correct + retrain it)
+    RUN_YOUTUBE_DESCRIPTION = False  # write the .txt to paste into the YouTube description (game details, times, goal estimates); uses the goal detection result
+    RUN_GOAL_DETECTION = False  # find the restarts from the centre spot (a goal is followed by one) and compare with the score; needs Transformations done
+    RUN_BALL_IMAGES = False  # save 40 full frames chosen to teach the ball detector where it fails (lost ball, false balls, small, fast...) for Roboflow
+    RUN_BROADCAST_PITCH_IMAGES = False  # save frames from the broadcast (edited) video for Roboflow pitch-keypoint labelling
+    RUN_MATCH_REPORT = False  # create the 12-page match report (PDF): possession, territory, shape, distance, speed, running
+    RUN_OPPOSITION_REPORT = False  # create the opposition reports (PDF, one per team): how they play, strong and weak points, game plan
+    RUN_PLAYER_REPORT = False  # PDF per selected player (or whole team): distance, max speed, pitch dots coloured by possession
+    PLAYER_REPORT_TARGET = "named"  # named | roster:<id> | team:<Team Name> | track:<id>
+
+    # DETECTION SETTINGS FOR VIDEO:
+    PITCH_DETECTION_OVERRIDE = True    # do we want to overide pitch detection and rather temp provide the vertices from our logger file instead ?
+    DURATION = 0   # How many seconds do we want to process from the GAME_RECORDS start time ? 960
+    BATCH_DURATION = 2  # Process 1 second per batch
+    DETECTION_FPS = 12  # Target FPS for detection (eg 12 = every 2nd frame in a 24 FPS video)
+    EXCLUDE_TIME_RANGES = []  # Define the time ranges to exclude (in seconds) [(1, 2), (4, 5)]
+
+    # COMMAND-LINE OPTIONS (the game logger's Run panel uses these; with none given, the values above are used as before):
+    #   python main.py --game 22 --steps detections,transformations,annotation --duration 120
+    import argparse
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument('--game', type=int, help='game id to process')
+    _ap.add_argument('--steps', help='comma separated: detections, transformations, detection_report, match_report, opposition_report, player_report, annotation, team_images, ball_images, broadcast_pitch_images, goal_detection, youtube_description')
+    _ap.add_argument('--duration', type=int, help='test run: only this many seconds from the game start; results are kept in separate test files')
+    _ap.add_argument('--annotate-background', choices=['analysis', 'edited'], default='analysis',
+                     help='video used as the annotated-video background: analysis (full overlays) or edited (header, dashboard, overhead map)')
+    _ap.add_argument('--annotate-edited-pitch', action='store_true',
+                     help='when background is edited: run the pitch-keypoint model and draw dotted thirds (slower)')
+    _ap.add_argument('--player-report',
+                     help="who to include in the player report: named | roster:<id> | team:<Team Name> | track:<id>")
+    _args, _unknown = _ap.parse_known_args()
+    if _args.game is not None:
+        GAME_ID = _args.game
+    if _args.steps is not None:
+        _steps = {s.strip() for s in _args.steps.split(',') if s.strip()}
+        _unknown_steps = _steps - {'detections', 'transformations', 'detection_report', 'match_report', 'opposition_report', 'player_report', 'annotation', 'team_images', 'ball_images', 'broadcast_pitch_images', 'goal_detection', 'youtube_description'}
+        if _unknown_steps:
+            raise SystemExit(f"STOPPED: unknown stage(s): {', '.join(sorted(_unknown_steps))}")
+        RUN_DETECTIONS = 'detections' in _steps
+        RUN_TRANSFORMATIONS = 'transformations' in _steps
+        RUN_DETECTIONS_REPORT = 'detection_report' in _steps
+        RUN_MATCH_REPORT = 'match_report' in _steps
+        RUN_OPPOSITION_REPORT = 'opposition_report' in _steps
+        RUN_PLAYER_REPORT = 'player_report' in _steps
+        RUN_ANNOTATION_VIDEO_CREATOR = 'annotation' in _steps
+        RUN_TEAM_IMAGES = 'team_images' in _steps
+        RUN_BALL_IMAGES = 'ball_images' in _steps
+        RUN_BROADCAST_PITCH_IMAGES = 'broadcast_pitch_images' in _steps
+        RUN_GOAL_DETECTION = 'goal_detection' in _steps
+        RUN_YOUTUBE_DESCRIPTION = 'youtube_description' in _steps
+    ANNOTATE_BACKGROUND = _args.annotate_background or 'analysis'
+    ANNOTATE_EDITED_PITCH = bool(getattr(_args, 'annotate_edited_pitch', False))
+    if getattr(_args, 'player_report', None):
+        PLAYER_REPORT_TARGET = _args.player_report
+        if _args.steps is None:
+            RUN_PLAYER_REPORT = True
+    TEST_RUN = bool(_args.duration)
+    if TEST_RUN:
+        DURATION = _args.duration
+
+    # INPUT GAME: Set which game to read in from with its details stored in the game-logger.xls
+    PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
+    PARENT_DIR = os.path.dirname(PARENT_DIR)
+    def find_file_in_parent(file_name, start_dir):
+        for root, dirs, files in os.walk(start_dir):
+            if file_name in files:
+                return os.path.join(root, file_name)
+        return None
+    GAME_DATA_FILE = find_file_in_parent('games-logger.xlsx', PARENT_DIR)
+    GAME_RECORD = None
+
+    # DATABASE/IMAGE STORAGE
+    DATABASE_FILE = None     # database we will create:
+    OBJECT_IMAGES_FOLDER = os.path.join(os.getcwd(), 'images_object_detection')   # where will we store all the bbox images of players from each frame
+
+    # STORE OUTPUT TO:
+    OUTPUT_PATH = os.path.join(PARENT_DIR, 'output')
+
+    
+    ############################################################ RUN SCRIPTS:
+
+    # - GET GAME DETAILS: details of the game to process from the game logger xls and update necessary variables:
+    game = GetGameData(GAME_ID,GAME_DATA_FILE,source=GAME_SOURCE)
+    GAME_RECORD = game.gameRecord()
+    print('-------------------------- GAME DETAIL: ')
+    for key, value in GAME_RECORD.items():
+        print(f"{key}: {value}")
+    
+    GAME_PITCH_KEYPOINTS_WITH_NAMES = game.getGamePitchKeyPointsWithNames(GAME_RECORD)
+    GAME_PITCH_BOUNDARIES = game.getGamePitchBoundaries(GAME_RECORD)
+    GAME_PITCH_KEYPOINTS = game.getGamePitchKeyPoints(GAME_RECORD)
+
+    # TEAMS:
+    TEAMS_INSTANCE = Teams(source=GAME_SOURCE)
+    ALL_TEAMS = TEAMS_INSTANCE.get_all_teams()
+    TEAMS = TEAMS_INSTANCE.get_playing_teams([GAME_RECORD['team_a'], 
+                                                     GAME_RECORD['team_b']])
+    # WHERE EVERYTHING IS SAVED: when the game logger has a data folder set (e.g. on the external drive) the game gets its own
+    # folder there: data/ (detections database, object images), reports/, videos/annotated/ and _work/ (throw-away files).
+    # With no data folder set (or reading from the Excel file) the old shared output folder is used.
+    GAME_PATHS = None
+    if GAME_SOURCE == 'database':
+        from game_logger import paths as game_paths
+        try:
+            GAME_PATHS = game_paths.pipeline_paths(GAME_ID)      # None = no data folder set
+        except game_paths.GameFolderError as err:
+            raise SystemExit(f"\nSTOPPED: {err}\n")
+    if GAME_PATHS:
+        DATABASE_FILE = GAME_PATHS['db']
+        OBJECT_IMAGES_FOLDER = GAME_PATHS['object_images']
+        OUTPUT_PATH = GAME_PATHS['reports']
+        ANNOTATED_PATH = GAME_PATHS['annotated']
+        WORK_DIR = GAME_PATHS['work']
+        print(f"Game folder: {GAME_PATHS['folder']}")
+    else:
+        DATABASE_FILE = os.path.join(PARENT_DIR,f"output/game-id-{GAME_RECORD['game_id']}-{StringUtils.replace_spaces_with_underscores(GAME_RECORD['title'])}.db")
+        ANNOTATED_PATH = OUTPUT_PATH
+        WORK_DIR = OUTPUT_PATH
+    if TEST_RUN:
+        # a test run never touches the real results: it has its own database, object images and report folder
+        _db_base, _db_ext = os.path.splitext(DATABASE_FILE)
+        DATABASE_FILE = _db_base + '-test' + _db_ext
+        OBJECT_IMAGES_FOLDER = OBJECT_IMAGES_FOLDER.rstrip('/\\') + '-test'
+        OUTPUT_PATH = os.path.join(OUTPUT_PATH, 'test')
+        os.makedirs(OUTPUT_PATH, exist_ok=True)
+        print(f"TEST RUN: only the first {DURATION} seconds from the game start; results go to separate test files")
+    print(f"Detections database: {DATABASE_FILE}")
+
+    # the analysis video must exist before we start (it is found in the game folder by name unless a path is set on the game)
+    if (RUN_DETECTIONS or RUN_TEAM_IMAGES or RUN_BALL_IMAGES or (RUN_ANNOTATION_VIDEO_CREATOR and ANNOTATE_BACKGROUND == 'analysis')) and not os.path.exists(str(GAME_RECORD['statistics_source_video'])):
+        raise SystemExit(f"\nSTOPPED: the analysis video was not found: {GAME_RECORD['statistics_source_video']}\n"
+                         "Put it in the game's videos folder as <game number>_analysis.mp4, or choose it on the game page in the game logger.\n")
+
+    # annotated video background: analysis (default, full overlays) or edited (header / dashboard / overhead)
+    ANNOTATE_BACKGROUND_VIDEO = GAME_RECORD['statistics_source_video']
+    ANNOTATE_FIELD_OVERLAYS = True
+    if RUN_ANNOTATION_VIDEO_CREATOR and ANNOTATE_BACKGROUND == 'edited':
+        ANNOTATE_FIELD_OVERLAYS = False
+        edited_path = None
+        if GAME_SOURCE == 'database':
+            from game_logger import db as gl_db, repo as gl_repo
+            _conn = gl_db.connect()
+            try:
+                _g = gl_repo.get_game(_conn, GAME_ID)
+                edited_path = ((_g.get('videos') or {}).get('edited') or {}).get('path') if _g else None
+            finally:
+                _conn.close()
+        else:
+            from game_logger import paths as game_paths
+            edited_path = game_paths.conventional_video(GAME_ID, 'edited')
+        if not edited_path or not os.path.exists(str(edited_path)):
+            raise SystemExit(f"\nSTOPPED: the edited video was not found"
+                             + (f": {edited_path}" if edited_path else "")
+                             + "\nPut it in the game's videos folder as <game number>_edited.mp4, or choose it on the game page, or use --annotate-background analysis.\n")
+        ANNOTATE_BACKGROUND_VIDEO = edited_path
+        _thirds = "pitch thirds ON" if ANNOTATE_EDITED_PITCH else "pitch thirds OFF"
+        print(f"Annotated background: edited video (dashboard / header / overhead; {_thirds}): {ANNOTATE_BACKGROUND_VIDEO}")
+    elif not RUN_ANNOTATION_VIDEO_CREATOR or ANNOTATE_BACKGROUND != 'edited':
+        ANNOTATE_EDITED_PITCH = False
+
+    print('-------------------------- PROCESSING STARTED: ')
+
+    # - DETECTIONS SAVE TO DB: run YOLO detections and team assigner then store to db
+    if RUN_DETECTIONS == True:
+        database = CreateDatabase(DURATION, 
+                                BATCH_DURATION, 
+                                DETECTION_FPS, 
+                                EXCLUDE_TIME_RANGES, 
+                                DATABASE_FILE, 
+                                OBJECT_IMAGES_FOLDER,
+                                TEAMS,
+                                GAME_RECORD,
+                                PITCH_DETECTION_OVERRIDE,
+                                GAME_PITCH_KEYPOINTS_WITH_NAMES,
+                                GAME_PITCH_KEYPOINTS,
+                                GAME_PITCH_BOUNDARIES,
+                                WORK_DIR=WORK_DIR)
+        database.run()
+
+
+    # - TRANSFORMATIONS: Do calculations for view transforming (to get positions in vertical/map view and calculate from it the speed/distance calculations:
+    if RUN_TRANSFORMATIONS == True:
+        db_transformations = CreateViewTransformations(DATABASE_FILE,
+                                                       GAME_RECORD,
+                                                       PITCH_DETECTION_OVERRIDE)
+        db_transformations.run()
+        # one stable player_id per real player (repairs broken tracker ids, settles team labels)
+        db_track_stitcher = TrackStitcher(DATABASE_FILE,
+                                          GAME_RECORD)
+        db_track_stitcher.run()
+        # goalkeepers = whoever lives in a goal-end arc (by position, not by kit or by the detector's class)
+        KeeperZone(DATABASE_FILE, GAME_RECORD).run()
+        db_speed_distance = SpeedDistanceUpdater(DATABASE_FILE,
+                                                 GAME_RECORD,
+                                                 DURATION)
+        db_speed_distance.run()
+        db_ball_posession = BallPosessionUpdater(DATABASE_FILE,
+                                                 GAME_RECORD)
+        db_ball_posession.run()
+        # which way each team attacks (+x / -x): short sample at kick-off, flip at half-time if set; stored in the detections DB
+        DirectionOfPlay(DATABASE_FILE, GAME_RECORD,
+                        [GAME_RECORD.get("team_a"), GAME_RECORD.get("team_b")]).run()
+
+
+    # - DETECTION REPORT: create report with detection statistics
+    if RUN_DETECTIONS_REPORT == True:
+        report = CreateDetectionsReport(DATABASE_FILE,
+                                        OUTPUT_PATH,
+                                        TEAMS,
+                                        GAME_RECORD,
+                                        DETECTION_FPS)
+        report.run()
+
+
+    # - MATCH REPORT: 12-page PDF with team statistics for both teams
+    if RUN_MATCH_REPORT == True:
+        report = CreateMatchReport(DATABASE_FILE,
+                                   OUTPUT_PATH,
+                                   TEAMS,
+                                   GAME_RECORD,
+                                   DETECTION_FPS)
+        report.run()
+
+    # - OPPOSITION REPORTS: one scouting PDF per team, written for the other team's coach
+    if RUN_OPPOSITION_REPORT == True:
+        opposition = CreateOppositionReport(DATABASE_FILE,
+                                            OUTPUT_PATH,
+                                            TEAMS,
+                                            GAME_RECORD,
+                                            DETECTION_FPS)
+        opposition.run()
+
+    # - PLAYER REPORT: distance / speed / possession-coloured pitch dots for named players or a whole team
+    if RUN_PLAYER_REPORT == True:
+        player_report = CreatePlayerReport(DATABASE_FILE,
+                                           OUTPUT_PATH,
+                                           TEAMS,
+                                           GAME_RECORD,
+                                           DETECTION_FPS,
+                                           target=PLAYER_REPORT_TARGET)
+        player_report.run()
+
+    # - TEAM TRAINING IMAGES: players from 10 random frames saved as pictures, filed by what the team model said
+    if RUN_TEAM_IMAGES == True:
+        TEAM_IMAGES_FOLDER = os.path.join(GAME_PATHS['folder'] if GAME_PATHS else OUTPUT_PATH, 'team-images')
+        ExtractTeamImages(DATABASE_FILE,
+                          GAME_RECORD['statistics_source_video'],
+                          TEAM_IMAGES_FOLDER,
+                          GAME_RECORD,
+                          n_frames=10,
+                          team_model_path=os.path.join('models', 'teams', TEAM_MODEL_FILE)).run()
+
+    # - BALL TRAINING IMAGES: 40 full frames picked where the ball detector is weak (ball lost, false balls, tiny, fast ...)
+    if RUN_BALL_IMAGES == True:
+        BALL_IMAGES_FOLDER = os.path.join(GAME_PATHS['folder'] if GAME_PATHS else OUTPUT_PATH, 'ball-images')
+        ExtractBallImages(DATABASE_FILE,
+                          GAME_RECORD['statistics_source_video'],
+                          BALL_IMAGES_FOLDER,
+                          GAME_RECORD,
+                          n_frames=40).run()
+
+    # - BROADCAST VIDEO PITCH TRAINING IMAGES: frames from the edited / broadcast video for Roboflow pitch keypoints
+    if RUN_BROADCAST_PITCH_IMAGES == True:
+        broadcast_path = None
+        if GAME_SOURCE == 'database':
+            from game_logger import db as gl_db, repo as gl_repo
+            _conn = gl_db.connect()
+            try:
+                _g = gl_repo.get_game(_conn, GAME_ID)
+                broadcast_path = ((_g.get('videos') or {}).get('edited') or {}).get('path') if _g else None
+            finally:
+                _conn.close()
+        else:
+            from game_logger import paths as game_paths
+            broadcast_path = game_paths.conventional_video(GAME_ID, 'edited')
+        BROADCAST_PITCH_FOLDER = os.path.join(GAME_PATHS['folder'] if GAME_PATHS else OUTPUT_PATH, 'broadcast-pitch-images')
+        ExtractBroadcastPitchImages(broadcast_path,
+                                    BROADCAST_PITCH_FOLDER,
+                                    GAME_RECORD,
+                                    n_frames=40).run()
+
+    # - GOAL DETECTION: restarts from the centre spot (version 0), compared with the score in the game logger
+    if RUN_GOAL_DETECTION == True:
+        GoalDetection(DATABASE_FILE,
+                      OUTPUT_PATH,
+                      GAME_RECORD,
+                      GAME_RECORD['statistics_source_video']).run()
+
+    # - YOUTUBE DESCRIPTION: a .txt for the video description: teams, date, game times and the goal estimates (click-able time stamps)
+    if RUN_YOUTUBE_DESCRIPTION == True:
+        YoutubeDescription(OUTPUT_PATH,
+                           GAME_RECORD,
+                           DATABASE_FILE,
+                           GAME_RECORD['statistics_source_video']).run()
+
+    # - ANNOTATED VIDEO: run creating an annotated video with player detections, pitch top view etc
+    if RUN_ANNOTATION_VIDEO_CREATOR == True:
+        
+        annotated_video = CreateVideoAnnotated(DURATION, 
+                                BATCH_DURATION, 
+                                DATABASE_FILE, 
+                                OBJECT_IMAGES_FOLDER,
+                                OUTPUT_PATH,
+                                TEAMS,
+                                GAME_RECORD,
+                                PITCH_DETECTION_OVERRIDE,
+                                GAME_PITCH_KEYPOINTS_WITH_NAMES,
+                                GAME_PITCH_BOUNDARIES,
+                                ANNOTATED_PATH=ANNOTATED_PATH,
+                                WORK_DIR=WORK_DIR,
+                                BACKGROUND_VIDEO=ANNOTATE_BACKGROUND_VIDEO,
+                                FIELD_OVERLAYS=ANNOTATE_FIELD_OVERLAYS,
+                                EDITED_PITCH_THIRDS=ANNOTATE_EDITED_PITCH)
+        annotated_video.run()
+
+
+if __name__ == '__main__':
+    main()

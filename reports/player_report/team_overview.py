@@ -33,6 +33,16 @@ FINAL_PALETTE = [
 ]
 
 
+def _short(name):
+    """Name for chart labels: first name plus the first letter of the surname (\"Mark C.\"), so players who share a first name can be told apart."""
+    parts = str(name or "").split()
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} {parts[-1][0].upper()}."
+
+
 def _safe_name(label):
     s = re.sub(r"[^\w\-]+", "-", str(label).strip(), flags=re.UNICODE)
     return (re.sub(r"-{2,}", "-", s).strip("-_") or "team")[:48]
@@ -189,7 +199,7 @@ def work_rate(fr, ctx):
     fig = fr.new(f"{S_['team']} · Work rate",
                  "Distance covered, and how often each player was close to or at the running limit.")
     players = S_["players"]
-    names = [p["name"].split()[0] if p["name"] else "?" for p in players]
+    names = [_short(p["name"]) for p in players]
     x = np.arange(len(players))
     run_kmh = S_.get("running_kmh") or 15.0
     near = max(run_kmh * pm.NEAR_RUN_FRAC, run_kmh - 3.0)
@@ -243,7 +253,7 @@ def work_rate(fr, ctx):
     lines = []
     for p in players:
         b = p.get("speed_bands") or {}
-        lines.append(f"{p['name'].split()[0]}: close {b.get('close', 0)}, running {b.get('running', 0)}")
+        lines.append(f"{_short(p['name'])}: close {b.get('close', 0)}, running {b.get('running', 0)}")
     fig.text(0.08, 0.22, "Close / running counts", fontsize=10, fontweight="bold")
     fig.text(0.08, 0.18, "   ·   ".join(lines[:8]), fontsize=8, color=S.MUTED)
     if len(lines) > 8:
@@ -264,7 +274,7 @@ def possession_stats(fr, ctx):
     fig = fr.new(f"{S_['team']} · Ball possession",
                  "Times each player was the ball holder, and how long those spells lasted.")
     players = sorted(S_["players"], key=lambda p: (-(p.get("ball_spells") or {}).get("count", 0), p["name"]))
-    names = [p["name"].split()[0] if p["name"] else "?" for p in players]
+    names = [_short(p["name"]) for p in players]
     counts = [int((p.get("ball_spells") or {}).get("count") or 0) for p in players]
     avgs = [_num((p.get("ball_spells") or {}).get("avg_s"), 0) for p in players]
     mins = [(p.get("ball_spells") or {}).get("min_s") for p in players]
@@ -332,7 +342,7 @@ def tracking_quality(fr, ctx):
     fig = fr.new(f"{S_['team']} · Tracking quality",
                  "Report confidence rests on how much of the game each player was detected.")
     players = sorted(S_["players"], key=lambda p: (-p["coverage_pct"], p["name"].lower()))
-    names = [p["name"].split()[0] if p["name"] else "?" for p in players]
+    names = [_short(p["name"]) for p in players]
     cov = [p["coverage_pct"] for p in players]
     colours = []
     for c in cov:
@@ -398,7 +408,7 @@ def pitch_squad_final_third(fr, ctx):
         y_name = 0.705
         for i, p in enumerate(players):
             col = FINAL_PALETTE[i % len(FINAL_PALETTE)]
-            label = (p.get("name") or f"P{i + 1}").split()[0]
+            label = _short(p.get("name") or f"P{i + 1}")
             cx = cx0 + i * step
             cy = y_img + ph * 0.5
             xi = cx - pw * 0.5

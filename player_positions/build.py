@@ -1,0 +1,594 @@
+"""Player positions: the saved, named-player layer for a game.
+
+The Game Logger's Identity page links a roster player to stitched track ids (table identity_assignments in game-logger.db).
+Until now those links were only resolved in memory, when a player report was made. This module resolves them ONCE, with fixed
+rules, and SAVES the result next to the game's other files:
+
+    <game folder>/data/NNNN_players.db
+
+so that reports, agents and analysts all read the same clean table instead of each rebuilding (and slightly differing on) the logic.
+
+It reads the detections database and game-logger.db strictly READ-ONLY. The loading, game window, possession and attack-direction
+code is the player report's own (reports/player_report/metrics.py), so the numbers match the reports.
+
+Rules (also written into the saved file, table build_info):
+  1. A tag overrides the detected team and class: the person is on their own team (flagged team_overridden / gk_zone).
+  2. A newer tag for the same person on another track defines where that person is over the range it covers: the older tag is clipped
+     there (even on frames where the newer track has no box) PROVIDED the two tracks coexist for at least 12 frames at a median
+     separation over 2 m, i.e. there is evidence they are different people. Without that evidence both are kept (they may be the same
+     person's real path). Either way the rows in that range carry flag bit 4 (identity in dispute). If two tags
+     claim the same box in the same frame, the NEWER tag (created_at, then id) wins (flag bit 1).
+  3. A person is on at most one box per frame: the newer tag wins, then the box of the person's usual class (a goalkeeper-class box
+     merged into an outfield chain is not that person), then the higher detector confidence (flag bit 2).
+  4. Nothing is interpolated: a frame with no box for the person simply has no row. Half-time is excluded.
+  5. Positions are the report's x / y (metres, pitch centred) plus u / v: the same point turned so the person's team always
+     attacks toward +u (attack direction is stored in build_info).
+
+Safe to re-run at any time; it overwrites the file (built in a temp folder, copied, then checked). `check_current()` says whether the saved file still matches the
+detections database and the tags (a re-run of detections/stitching, or new tagging, makes it stale).
+"""
+import hashlib
+import json
+import math
+import os
+import shutil
+import sqlite3
+import tempfile
+import time
+
+import numpy as np
+import pandas as pd
+
+SCHEMA_VERSION = 1
+MIN_COMMON_FRAMES = 12       # two tracks must share this many frames to count as evidence of two different people
+MIN_SEPARATION_M = 2.0       # ... and be at least this far apart (median) over those frames
+SPEED_JUMP_KMH = 25.0        # a join between two tracks implying more than this is flagged as implausible
+JOIN_MAX_GAP_S = 5.0         # joins across a longer gap say nothing about plausibility
+GAP_REPORT_S = 2.0           # gaps longer than this count in the quality table
+
+RULES_TEXT = (
+    "1 tag overrides detected team/class (team_overridden, gk_zone flags); "
+    "2 a newer tag for the same person on another track clips the older tag over its range when both tracks coexist 12+ frames more than 2 m apart, else both are kept; flag bit 4 either way; same box claimed by two people: newer tag (created_at, id) wins, conflict bit 1; "
+    "3 one box per person per frame: newer tag, then the box of the person's usual class, then higher confidence, conflict bit 2; "
+    "4 no interpolation, half-time excluded; "
+    "5 u,v = x,y turned so the person's team attacks toward +u (periods in build_info.attack_periods)."
+)
+
+COLUMN_DOCS = {
+    "player_frames": [
+        ("frame_id", "video frame number (24 fps video; detections on even frames, 12 per second)"),
+        ("t_video_s", "seconds into the analysis video"),
+        ("t_game_s", "game clock in seconds from kick-off with half-time removed"),
+        ("half", "1 or 2 (always 1 when the game has no half-time)"),
+        ("roster_player_id", "player_id in game-logger.db players table"),
+        ("name", "roster player name"),
+        ("x_m", "metres along the pitch length, pitch-centred (about -18..+18), as in the detections DB"),
+        ("y_m", "metres across the pitch width, pitch-centred (about -10..+10)"),
+        ("u_m", "x turned so the person's team attacks toward +u (own goal at -u); NULL if the team is not one of the two playing teams"),
+        ("v_m", "y turned the same way (a 180 degree turn, so left/right is as seen by the player attacking toward +u)"),
+        ("speed_kmh", "detections DB speed (km/h); NULL where above the glitch ceiling"),
+        ("in_pitch", "1 = inside the pitch outline. Goalkeepers stand outside it, so filter on this for outfield heat maps"),
+        ("class_name", "detector class: player or goalkeeper"),
+        ("team_detected", "team label the detections DB had on this box"),
+        ("team_final", "the person's team (from the roster)"),
+        ("team_overridden", "1 = team_detected differs from team_final (the tag won)"),
+        ("gk_zone", "1 = the pipeline labelled this box Goalkeeper (stood in a goal-end arc)"),
+        ("class_mismatch", "1 = this box's class differs from the person's usual class (e.g. a goalkeeper-class box inside an outfield player's chain: probably another person; filter these out)"),
+        ("conflict", "bit mask: 1 = another person's tag also claimed this box; 2 = this person was also on another box in the same frame (the other was dropped); 4 = an older tag for this person on another track was overridden over this range (identity in dispute: review)"),
+        ("source_track_id", "stitched player_id in the detections DB this row came from"),
+        ("source_assignment_id", "identity_assignments.id of the tag that supplied it"),
+        ("confidence", "detector confidence of the box"),
+        ("has_ball", "1 = the detections DB marks this person as the ball holder"),
+        ("phase", "1 = person's team has the ball, 0 = other team, -1 = unknown (same rule as the player report)"),
+        ("ball_x", "cleaned ball position x (metres), NULL when the ball was not seen"),
+        ("ball_y", "cleaned ball position y (metres)"),
+        ("ball_u", "ball x in the person's attacking frame"),
+        ("ball_v", "ball y in the person's attacking frame"),
+        ("ball_third", "-1 ball in the person's own third (u <= -6 m), 0 middle, +1 final third (u >= 6 m), NULL unknown"),
+    ],
+    "clean_frames": [("view", "RECOMMENDED DEFAULT for outfield positions: player_frames where in_pitch = 1, class_mismatch = 0 and gk_zone = 0. Use player_frames only when you need the rest (goalkeeper work, or auditing). conflict bit 4 rows are in here too: filter on conflict & 4 = 0 for identity-certain frames only.")],
+    "identity_segments": [
+        ("id", "identity_assignments.id"),
+        ("status", "used = supplied rows; redundant = same person and boxes already covered by a newer tag (safe to delete); overridden = a newer tag put the SAME person on another track over its whole range (review); superseded = its boxes went to a newer tag for a DIFFERENT person (review); empty = no detections for that track in range"),
+        ("anchor_frame / anchor_x / anchor_y", "first detection of the track at or after from_frame and where it was (metres): use to re-link a tag if stitched ids change"),
+        ("frames_claimed / frames_used", "detection frames the tag covered / frames that ended up in player_frames"),
+    ],
+    "tag_collisions": [
+        ("older_id / newer_id", "identity_assignments ids that disagreed; the newer one won"),
+        ("kind", "same_person_two_tracks (one person tagged on two tracks over the same frames; the newer tag defines the range, the older is clipped); same_box_two_people (two people tagged on one box); same_person_two_boxes (rare: one person ends up on two boxes via different tags); track_two_boxes (ONE track has two boxes in the same frame: the stitcher merged two people, or a duplicate detection)"),
+        ("frames / seconds / first_frame / last_frame", "how long they disagreed"),
+        ("action", "what the builder did: older clipped / kept both (no evidence of two people) / newer tag wins the box / one box kept"),
+        ("median_sep_m", "median distance between the two tracks' boxes on frames where both exist (large = they are different people)"),
+    ],
+    "quality": [("per person per half", "coverage_pct = share of detection frames with a row; gaps; conflicts; goalkeeper and team-override frames")],
+    "join_checks": [("per join between two tracks for one person", "gap_s, distance, implied km/h; flagged = implausible (> 25 km/h within 5 s)")],
+    "build_info": [("key/value", "how and from what this file was built, including the fingerprints used by check_current()")],
+}
+
+
+# ------------------------------------------------------------------------------------------------ helpers
+
+def _app():
+    """Late imports of the app's own modules (they pull in the pipeline's dependencies)."""
+    from game_logger import config, paths, record
+    from reports.match_report import metrics as mm
+    from reports.player_report import metrics as pm
+    return config, paths, record, mm, pm
+
+
+def _ro(path):
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def players_db_path(game_id):
+    _, paths, _, _, _ = _app()
+    folder = paths.game_folder(game_id)
+    if not folder:
+        raise RuntimeError("No game folder found. Set the data folder in the Game Logger (or WALKING_FOOTBALL_ROOT) and connect the drive.")
+    return os.path.join(folder, "data", f"{paths.prefix(game_id)}_players.db")
+
+
+def _load_tags(lconn, game_id):
+    rows = lconn.execute(
+        """
+        SELECT a.id, a.roster_player_id, p.name, p.squad, t.name AS team_name, a.track_player_id,
+               a.from_frame, a.to_frame, a.skip_until_frame, a.created_at
+        FROM identity_assignments a
+        JOIN players p ON p.player_id = a.roster_player_id
+        LEFT JOIN teams t ON t.team_id = p.team_id
+        WHERE a.game_id = ?
+        ORDER BY a.created_at, a.id
+        """, (int(game_id),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _tags_hash(tags):
+    key = [(t["id"], t["roster_player_id"], t["track_player_id"], t["from_frame"], t["to_frame"], t["created_at"]) for t in tags]
+    return hashlib.sha256(json.dumps(sorted(key), default=str).encode()).hexdigest()
+
+
+def _detections_fingerprint(db_path):
+    st = os.stat(db_path)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        n, mx = conn.execute("SELECT COUNT(*), MAX(player_id) FROM detected_objects").fetchone()
+    finally:
+        conn.close()
+    return {"path": db_path, "bytes": st.st_size, "mtime": st.st_mtime, "rows": int(n), "max_player_id": None if mx is None else int(mx)}
+
+
+def _team_index(name, teams):
+    if name is None:
+        return None
+    for i, tm in enumerate(teams):
+        if tm and str(tm).strip().lower() == str(name).strip().lower():
+            return i
+    return None
+
+
+# ------------------------------------------------------------------------------------------------ resolution
+
+def _resolve(df, tags):
+    """Apply the rules. df: boxes (index 0..n-1) with pid, frame_id, x, y, confidence, class_name; tags oldest first.
+
+    Returns (winners, collisions, info). winners: one row per person-frame -> DataFrame[row, rid, aid, rank, conflict].
+    info: claimed / lost_other / clipped counts per tag id, and `disputed` = {rid: [(lo, hi), ...]} frame ranges where an older tag
+    for the same person on another track was overridden (the identity there is less certain).
+    """
+    order = {t["id"]: i for i, t in enumerate(tags)}          # tags arrive oldest first (created_at, id)
+    pid_arr = df["pid"].to_numpy()
+    fr_arr = df["frame_id"].to_numpy()
+    x_arr, y_arr = df["x"].to_numpy(float), df["y"].to_numpy(float)
+    INF = float("inf")
+    by_pid = {tid: np.flatnonzero(pid_arr == tid) for tid in {int(t["track_player_id"]) for t in tags}}
+
+    def rng(t):
+        return float(t["from_frame"]), (INF if t["to_frame"] is None else float(t["to_frame"]))
+
+    tag_rows = {}
+    for t in tags:
+        idx = by_pid.get(int(t["track_player_id"]), np.array([], dtype=int))
+        lo, hi = rng(t)
+        if len(idx):
+            fr = fr_arr[idx]
+            idx = idx[(fr >= lo) & (fr <= hi)]
+        tag_rows[t["id"]] = idx
+    claimed = {aid: int(len(r)) for aid, r in tag_rows.items()}
+
+    # 1. a newer tag for the same person on ANOTHER track defines where that person is for the range it covers:
+    #    older tags (same person, other track) are clipped over that range, even on frames where the newer track has no box
+    coll, clipped, disputed = [], {t["id"]: 0 for t in tags}, {}
+    for i, t in enumerate(tags):
+        rows = tag_rows[t["id"]]
+        for nt in tags[i + 1:]:
+            if nt["roster_player_id"] != t["roster_player_id"] or int(nt["track_player_id"]) == int(t["track_player_id"]):
+                continue
+            lo = max(rng(t)[0], rng(nt)[0]); hi = min(rng(t)[1], rng(nt)[1])
+            if lo > hi or not len(rows):
+                continue
+            fr = fr_arr[rows]
+            inside = (fr >= lo) & (fr <= hi)
+            if not inside.any():
+                continue
+            nrows = tag_rows[nt["id"]]
+            nrows = nrows[(fr_arr[nrows] >= lo) & (fr_arr[nrows] <= hi)]
+            if not len(nrows):
+                continue       # the newer track has no boxes in this range: an over-extended tag or a hand-over, not a dispute
+            disputed.setdefault(t["roster_player_id"], []).append((lo, hi))
+            sep, ncommon = np.nan, 0
+            if len(nrows):
+                a = pd.DataFrame({"f": fr_arr[rows[inside]], "x": x_arr[rows[inside]], "y": y_arr[rows[inside]]}).drop_duplicates("f")
+                b = pd.DataFrame({"f": fr_arr[nrows], "x": x_arr[nrows], "y": y_arr[nrows]}).drop_duplicates("f")
+                m = a.merge(b, on="f")
+                ncommon = len(m)
+                if ncommon:
+                    sep = float(np.median(np.hypot(m["x_x"] - m["x_y"], m["y_x"] - m["y_y"])))
+            # clip only with evidence of two different people (both tracks present at once, well apart). If the newer track has no
+            # boxes there (or they never coexist) the older track may be the same person's real path: keep it, flag the range.
+            evidence = ncommon >= MIN_COMMON_FRAMES and sep > MIN_SEPARATION_M
+            for f in np.unique(fr[inside]):
+                coll.append({"older_id": t["id"], "newer_id": nt["id"], "kind": "same_person_two_tracks", "frame_id": int(f), "sep_m": sep,
+                             "action": "older clipped" if evidence else "kept both (no evidence of two people)"})
+            if evidence:
+                clipped[t["id"]] += int(inside.sum())
+                rows = rows[~inside]
+        tag_rows[t["id"]] = rows
+
+    parts = [pd.DataFrame({"row": r, "aid": t["id"], "rid": t["roster_player_id"], "rank": order[t["id"]]})
+             for t in tags for r in [tag_rows[t["id"]]] if len(r)]
+    info = {"claimed": claimed, "lost_other": {}, "clipped": clipped, "disputed": disputed}
+    if not parts:
+        return pd.DataFrame(columns=["row", "rid", "aid", "rank", "conflict"]), pd.DataFrame(coll), info
+    C = pd.concat(parts, ignore_index=True)
+
+    # 2. one box, two people: newest claim wins
+    n_people = C.groupby("row")["rid"].nunique()
+    contested = set(n_people[n_people > 1].index)
+    C = C.sort_values(["row", "rank"])
+    W = C.groupby("row", as_index=False).tail(1).copy()           # newest claim per box
+    W["conflict"] = np.where(W["row"].isin(contested), 1, 0)
+    win_rid = W.set_index("row")["rid"]
+    C["win_rid"] = C["row"].map(win_rid)
+    info["lost_other"] = C[C["win_rid"] != C["rid"]].groupby("aid").size().to_dict()      # boxes this tag lost to ANOTHER person
+    if contested:
+        Cc = C[C["row"].isin(contested)]
+        win = W.set_index("row")
+        for row, g in Cc.groupby("row"):
+            w = win.loc[row]
+            for rid, gg in g[g["rid"] != w["rid"]].groupby("rid"):
+                coll.append({"older_id": int(gg["aid"].iloc[-1]), "newer_id": int(w["aid"]), "kind": "same_box_two_people",
+                             "frame_id": int(fr_arr[row]), "sep_m": np.nan, "action": "newer tag wins the box"})
+
+    # 3. one person, two boxes: newest tag, then the box of the person's usual class (a goalkeeper-class box merged into an outfield
+    #    chain by the stitcher is not that person), then confidence
+    W["frame_id"] = fr_arr[W["row"].to_numpy()]
+    W["conf"] = df["confidence"].to_numpy()[W["row"].to_numpy()]
+    W["conf"] = W["conf"].fillna(-1.0)
+    W["cls"] = df["class_name"].to_numpy()[W["row"].to_numpy()]
+    majority = W.groupby("rid")["cls"].agg(lambda v: v.value_counts().idxmax())
+    W["cm"] = (W["cls"] == W["rid"].map(majority)).astype(int)
+    W = W.sort_values(["rid", "frame_id", "rank", "cm", "conf"])
+    dup = W.duplicated(["rid", "frame_id"], keep=False)
+    if dup.any():
+        for (rid, fr), g in W[dup].groupby(["rid", "frame_id"]):
+            keep = g.iloc[-1]
+            for _, lose in g.iloc[:-1].iterrows():
+                sep = float(np.hypot(x_arr[int(keep["row"])] - x_arr[int(lose["row"])], y_arr[int(keep["row"])] - y_arr[int(lose["row"])]))
+                kind = "track_two_boxes" if int(lose["aid"]) == int(keep["aid"]) else "same_person_two_boxes"
+                coll.append({"older_id": int(lose["aid"]), "newer_id": int(keep["aid"]), "kind": kind, "frame_id": int(fr), "sep_m": sep,
+                             "action": "one box kept (newer tag, usual class, confidence)"})
+        last = ~W.duplicated(["rid", "frame_id"], keep="last")
+        W.loc[dup & last, "conflict"] = W.loc[dup & last, "conflict"] | 2
+        W = W[~(dup & ~last)]
+    W = W.drop(columns=[c for c in ("conf", "frame_id", "cls", "cm") if c in W.columns])
+    return W.reset_index(drop=True), pd.DataFrame(coll), info
+
+
+def _collision_table(coll, video_fps):
+    cols = ["older_id", "newer_id", "kind", "action", "frames", "seconds", "first_frame", "last_frame", "median_sep_m"]
+    if coll is None or coll.empty:
+        return pd.DataFrame(columns=cols)
+    g = coll.groupby(["older_id", "newer_id", "kind", "action"])
+    out = g.agg(frames=("frame_id", "nunique"), first_frame=("frame_id", "min"), last_frame=("frame_id", "max"),
+                median_sep_m=("sep_m", "median")).reset_index()
+    out["seconds"] = (out["frames"] / (video_fps / 2.0)).round(1)           # detection frames are every 2nd video frame
+    return out[cols].sort_values("first_frame").reset_index(drop=True)
+
+
+# ------------------------------------------------------------------------------------------------ build
+
+def build_player_positions(game_id, out_path=None, verbose=True):
+    config, paths, record_mod, mm, pm = _app()
+    say = print if verbose else (lambda *a, **k: None)
+    t0 = time.time()
+    game_id = int(game_id)
+
+    db_path = paths.detections_db(game_id)
+    if not db_path or not os.path.isfile(db_path):
+        raise RuntimeError(f"No detections database for game {game_id}. Run Detections (and Transformations) first.")
+    out_path = out_path or players_db_path(game_id)
+
+    lconn = _ro(config.DB_PATH)
+    try:
+        rec = record_mod.build_game_record(lconn, game_id)
+        if rec is None:
+            raise RuntimeError(f"Game {game_id} is not in the Game Logger.")
+        tags = _load_tags(lconn, game_id)
+    finally:
+        lconn.close()
+    if not tags:
+        raise RuntimeError(f"Game {game_id} has no named-player tags yet (Game Logger, Identity page).")
+    teams = [rec.get("team_a"), rec.get("team_b")]
+    say(f"Game {game_id}: {rec.get('title')} | {len(tags)} tags | detections DB {os.path.basename(db_path)}")
+
+    # ---- same load, window and possession as the player report (metrics.compute_player_reports)
+    df, video_fps, det_fps, mapping = pm._load_detections(db_path, teams)
+    step = float(np.median(np.diff(sorted(df["frame_id"].unique())))) / video_fps if df["frame_id"].nunique() > 1 else 1.0 / max(det_fps, 1)
+    t_first, t_last = float(df["t"].min()), float(df["t"].max())
+    start = mm._num(rec.get("game_start_seconds"), t_first)
+    end = mm._num(rec.get("game_end_seconds"), t_last)
+    ht0, ht1 = mm._num(rec.get("half_time_start_seconds")), mm._num(rec.get("half_time_end_seconds"))
+    start, end = max(start, t_first), min(end, t_last)
+    has_half = ht0 is not None and ht1 is not None and ht1 > ht0
+    in_game = (df["t"] >= start) & (df["t"] <= end)
+    if has_half:
+        in_game &= ~((df["t"] > ht0) & (df["t"] < ht1))
+    df = df[in_game].copy()
+    half_time = [ht0, ht1] if has_half else None
+    try:
+        running_kmh = float(rec.get("running_speed_km_h") or 15)
+    except (TypeError, ValueError):
+        running_kmh = 15.0
+
+    players = df[(df["class_name"].isin(["player", "goalkeeper"])) & (df["ins"] == 1) & df["x"].notna()].copy()
+    players_teams = players[players["team"].isin(teams)].copy()
+    ball = mm._clean_ball(df)
+    owner, _ = mm._possession(ball, players_teams, teams, step, start, end)
+    periods = pm._attack_periods(db_path, players_teams, teams, start, end, half_time)
+
+    # ---- resolve tags over every player/goalkeeper box that has a position (inside the pitch or not)
+    boxes = df[df["class_name"].isin(["player", "goalkeeper"]) & df["x"].notna() & df["pid"].notna()].reset_index(drop=True)
+    boxes["pid"] = boxes["pid"].astype(int)
+    W, coll, claim_info = _resolve(boxes, tags)
+    claimed, lost_other, clipped = claim_info["claimed"], claim_info["lost_other"], claim_info["clipped"]
+    collisions = _collision_table(coll, video_fps)
+    say(f"Resolved: {len(W)} person-frames; collisions: {int((collisions['kind'] == 'same_box_two_people').sum())} box-claims, "
+        f"{int((collisions['kind'] == 'same_person_two_boxes').sum())} person-on-two-boxes pairs, "
+        f"{int((collisions['kind'] == 'track_two_boxes').sum())} one-track-two-boxes pairs, "
+        f"{int((collisions['kind'] == 'same_person_two_tracks').sum())} same-person-two-tracks overlaps")
+
+    tag_by_rid = {}
+    for t in tags:
+        tag_by_rid[t["roster_player_id"]] = t
+    F = boxes.loc[W["row"].to_numpy()].reset_index(drop=True)
+    F["roster_player_id"] = W["rid"].to_numpy()
+    F["source_assignment_id"] = W["aid"].to_numpy()
+    F["conflict"] = W["conflict"].to_numpy().astype(int)
+    F["name"] = F["roster_player_id"].map({r: t["name"] for r, t in tag_by_rid.items()})
+    team_of = {}
+    for r, t in tag_by_rid.items():
+        ti = _team_index(t["team_name"], teams)
+        team_of[r] = teams[ti] if ti is not None else t["team_name"]
+    F["team_final"] = F["roster_player_id"].map(team_of)
+    F = F.rename(columns={"team": "team_detected", "pid": "source_track_id", "x": "x_m", "y": "y_m", "spd": "speed_kmh", "ins": "in_pitch"})
+    F["team_overridden"] = (F["team_detected"].astype(str) != F["team_final"].astype(str)).astype(int)
+    F["gk_zone"] = (F["team_detected"] == "Goalkeeper").astype(int)
+    F["in_pitch"] = F["in_pitch"].fillna(0).astype(int)
+    F["speed_kmh"] = F["speed_kmh"].where(F["speed_kmh"] <= pm.SPEED_GLITCH_KMH)
+    F["has_ball"] = F["has_ball"].fillna(False).astype(int)
+    for rid, spans in claim_info["disputed"].items():          # an older tag for this person on another track was overridden here
+        mk = (F["roster_player_id"] == rid).to_numpy()
+        hit = np.zeros(len(F), dtype=bool)
+        for lo, hi in spans:
+            hit |= ((F["frame_id"] >= lo) & (F["frame_id"] <= hi)).to_numpy()
+        F.loc[mk & hit, "conflict"] = F.loc[mk & hit, "conflict"] | 4
+    usual = F.groupby("roster_player_id")["class_name"].agg(lambda x: x.value_counts().idxmax())
+    F["class_mismatch"] = (F["class_name"] != F["roster_player_id"].map(usual)).astype(int)
+
+    # clock and half
+    F["t_video_s"] = F["t"]
+    ht_len = (ht1 - ht0) if has_half else 0.0
+    F["t_game_s"] = F["t"] - start - np.where(F["t"] >= (ht1 if has_half else 1e18), ht_len, 0.0)
+    F["half"] = np.where(has_half & (F["t"] >= (ht1 if has_half else 1e18)), 2, 1)
+
+    # attacking-frame coordinates and context, per team index (the report's own helper)
+    for c in ("u_m", "v_m", "ball_x", "ball_y", "ball_u", "ball_v", "ball_third"):
+        F[c] = np.nan
+    F["phase"] = -1
+    bpos = ball.set_index("frame_id")[["x", "y"]] if len(ball) else pd.DataFrame(columns=["x", "y"])
+    for ti in (0, 1):
+        m = (F["team_final"].map(lambda n: _team_index(n, teams)) == ti).to_numpy()
+        if not m.any():
+            continue
+        u, v, _ = pm._to_attacking_coords(F.loc[m, "x_m"].to_numpy(float), F.loc[m, "y_m"].to_numpy(float),
+                                          F.loc[m, "t"].to_numpy(float), periods, ti)
+        F.loc[m, "u_m"], F.loc[m, "v_m"] = u, v
+        if len(owner):
+            idx = np.clip(np.round((F.loc[m, "t"].to_numpy(float) - start) / max(step, 1e-6)).astype(int), 0, len(owner) - 1)
+            ow = owner[idx]
+            F.loc[m, "phase"] = np.where(ow < 0, -1, np.where(ow == ti, 1, 0))
+        if len(bpos):
+            fid = F.loc[m, "frame_id"]
+            bx = fid.map(bpos["x"]); by = fid.map(bpos["y"])
+            F.loc[m, "ball_x"], F.loc[m, "ball_y"] = bx.to_numpy(float), by.to_numpy(float)
+            ok = bx.notna().to_numpy()
+            if ok.any():
+                bu = np.full(len(fid), np.nan); bv = np.full(len(fid), np.nan)
+                bu[ok], bv[ok], _ = pm._to_attacking_coords(bx.to_numpy(float)[ok], by.to_numpy(float)[ok],
+                                                           F.loc[m, "t"].to_numpy(float)[ok], periods, ti)
+                F.loc[m, "ball_u"], F.loc[m, "ball_v"] = bu, bv
+                F.loc[m, "ball_third"] = np.where(np.isnan(bu), np.nan, np.where(bu <= -pm.THIRD, -1, np.where(bu >= pm.THIRD, 1, 0)))
+
+    # ---- identity_segments (frozen copy of the tags + what each one produced + a re-link anchor)
+    used = F.groupby("source_assignment_id").size().to_dict()
+    first_det = boxes.sort_values("frame_id")
+    segs = []
+    for t in tags:
+        tid = int(t["track_player_id"])
+        g = first_det[(first_det["pid"] == tid) & (first_det["frame_id"] >= int(t["from_frame"]))]
+        if t["to_frame"] is not None:
+            g = g[g["frame_id"] <= int(t["to_frame"])]
+        a = g.iloc[0] if len(g) else None
+        n_used = int(used.get(t["id"], 0))
+        lo = int(lost_other.get(t["id"], 0))
+        cl = int(clipped.get(t["id"], 0))
+        if claimed.get(t["id"], 0) == 0:
+            status = "empty"
+        elif n_used > 0:
+            status = "used"
+        elif cl > 0:
+            status = "overridden"          # a newer tag put the SAME person on another track over this range (review)
+        elif lo > 0:
+            status = "superseded"          # its boxes went to a newer tag for a DIFFERENT person
+        else:
+            status = "redundant"           # same person, same boxes, covered by a newer tag: safe to delete
+        
+        segs.append({
+            "id": t["id"], "roster_player_id": t["roster_player_id"], "name": t["name"], "team_name": t["team_name"],
+            "track_player_id": tid, "from_frame": int(t["from_frame"]),
+            "to_frame": None if t["to_frame"] is None else int(t["to_frame"]),
+            "skip_until_frame": t["skip_until_frame"], "created_at": t["created_at"],
+            "anchor_frame": None if a is None else int(a["frame_id"]),
+            "anchor_x": None if a is None else float(a["x"]), "anchor_y": None if a is None else float(a["y"]),
+            "frames_claimed": claimed.get(t["id"], 0), "frames_used": n_used, "frames_lost_to_other_person": lo, "frames_overridden_same_person": cl, "status": status,
+        })
+    segments = pd.DataFrame(segs)
+
+    # ---- quality per person per half, and join checks
+    play_s = {1: ((ht0 if has_half else end) - start), 2: ((end - ht1) if has_half else 0.0)}
+    q_rows, j_rows = [], []
+    for rid, g in F.groupby("roster_player_id"):
+        g = g.sort_values("frame_id")
+        for h in (1, 2):
+            gh = g[g["half"] == h]
+            exp = play_s[h] * det_fps
+            if exp <= 0:
+                continue
+            f = np.sort(gh["frame_id"].unique())
+            gaps = np.diff(f) / video_fps if len(f) > 1 else np.array([])
+            big = gaps[gaps > GAP_REPORT_S]
+            q_rows.append({
+                "roster_player_id": int(rid), "name": gh["name"].iloc[0] if len(gh) else tag_by_rid[rid]["name"], "half": h,
+                "expected_frames": int(round(exp)), "frames": int(len(f)),
+                "coverage_pct": round(min(100.0, 100.0 * len(f) / exp), 1),
+                "in_pitch_frames": int(gh[gh["in_pitch"] == 1]["frame_id"].nunique()),
+                "gaps_over_2s": int(len(big)), "gap_seconds": round(float(big.sum()), 1) if len(big) else 0.0,
+                "longest_gap_s": round(float(big.max()), 1) if len(big) else 0.0,
+                "tracks_used": int(gh["source_track_id"].nunique()),
+                "gk_zone_frames": int(gh["gk_zone"].sum()), "team_overridden_frames": int(gh["team_overridden"].sum()),
+                "class_mismatch_frames": int(gh["class_mismatch"].sum()),
+                "conflict_frames": int((gh["conflict"] > 0).sum()),
+            })
+        s = g["source_track_id"].to_numpy()
+        ch = np.flatnonzero(s[1:] != s[:-1])
+        for i in ch:
+            a, b = g.iloc[i], g.iloc[i + 1]
+            dt = (b["frame_id"] - a["frame_id"]) / video_fps
+            dist = float(np.hypot(b["x_m"] - a["x_m"], b["y_m"] - a["y_m"]))
+            kmh = dist / dt * 3.6 if dt > 0 else np.nan
+            j_rows.append({"roster_player_id": int(rid), "name": g["name"].iloc[0], "from_track": int(a["source_track_id"]),
+                           "to_track": int(b["source_track_id"]), "from_frame": int(a["frame_id"]), "to_frame": int(b["frame_id"]),
+                           "gap_s": round(float(dt), 2), "dist_m": round(dist, 2), "implied_kmh": None if np.isnan(kmh) else round(float(kmh), 1),
+                           "flagged": int(dt <= JOIN_MAX_GAP_S and not np.isnan(kmh) and kmh > SPEED_JUMP_KMH)})
+    quality = pd.DataFrame(q_rows)
+    joins = pd.DataFrame(j_rows)
+
+    # ---- build_info
+    fp = _detections_fingerprint(db_path)
+    info = {
+        "schema_version": SCHEMA_VERSION, "game_id": game_id, "title": rec.get("title"), "date": rec.get("date"),
+        "built_at": time.strftime("%Y-%m-%d %H:%M:%S"), "rules": RULES_TEXT,
+        "teams": json.dumps(teams), "team_label_mapping": json.dumps(mapping),
+        "game_start_s": start, "game_end_s": end, "half_time": json.dumps(half_time),
+        "attack_periods": json.dumps([[a, b, d] for a, b, d in periods]),
+        "attack_convention": "period direction = team A (first team listed) attacks toward +x when 1; team B is opposite. u,v already applied per team.",
+        "video_fps": video_fps, "detection_fps": det_fps, "running_kmh": running_kmh,
+        "n_tags": len(tags), "tags_hash": _tags_hash(tags),
+        "detections_db": fp["path"], "detections_bytes": fp["bytes"], "detections_mtime": fp["mtime"],
+        "detections_rows": fp["rows"], "detections_max_player_id": fp["max_player_id"],
+        "n_player_frames": int(len(F)), "n_collisions": int(len(collisions)),
+    }
+
+    cols = ["frame_id", "t_video_s", "t_game_s", "half", "roster_player_id", "name", "x_m", "y_m", "u_m", "v_m", "speed_kmh", "in_pitch",
+            "class_name", "team_detected", "team_final", "team_overridden", "gk_zone", "class_mismatch", "conflict", "source_track_id",
+            "source_assignment_id", "confidence", "has_ball", "phase", "ball_x", "ball_y", "ball_u", "ball_v", "ball_third"]
+    P = F[cols].sort_values(["roster_player_id", "frame_id"]).reset_index(drop=True)
+
+    # Build in a temporary folder, then copy over the destination. SQLite needs journal/rename support that an external or
+    # network drive may not give (and a drive may not allow deleting), so it is never built in place on the game folder.
+    tmpdir = tempfile.mkdtemp(prefix="players_")
+    tmp = os.path.join(tmpdir, os.path.basename(out_path))
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    out = sqlite3.connect(tmp)
+    try:
+        P.to_sql("player_frames", out, index=False)
+        segments.to_sql("identity_segments", out, index=False)
+        collisions.to_sql("tag_collisions", out, index=False)
+        quality.to_sql("quality", out, index=False)
+        joins.to_sql("join_checks", out, index=False)
+        pd.DataFrame([{"key": k, "value": str(v)} for k, v in info.items()]).to_sql("build_info", out, index=False)
+        pd.DataFrame([{"table_name": t, "column_name": c, "description": d} for t, items in COLUMN_DOCS.items() for c, d in items]
+                     ).to_sql("columns_doc", out, index=False)
+        try:                                                     # the declared positions / formation (Track Players page); none yet is fine
+            from game_logger import game_roles
+            rconn = _ro(config.DB_PATH)
+            try:
+                game_roles.write_tables(out, rconn, int(game_id))
+            finally:
+                rconn.close()
+        except Exception as e:                                   # noqa: BLE001 - never lose the build over this
+            say(f"  (declared positions not added: {e})")
+        out.execute("CREATE VIEW clean_frames AS SELECT * FROM player_frames WHERE in_pitch = 1 AND class_mismatch = 0 AND gk_zone = 0")
+        out.execute("CREATE INDEX idx_pf_player ON player_frames(roster_player_id, frame_id)")
+        out.execute("CREATE INDEX idx_pf_frame ON player_frames(frame_id)")
+        out.commit()
+    finally:
+        out.close()
+    shutil.copyfile(tmp, out_path)
+    chk = sqlite3.connect(f"file:{out_path}?mode=ro", uri=True)
+    try:
+        ok = chk.execute("PRAGMA quick_check").fetchone()[0]
+        n_back = chk.execute("SELECT COUNT(*) FROM player_frames").fetchone()[0]
+    finally:
+        chk.close()
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    if ok != "ok" or n_back != len(P):
+        raise RuntimeError(f"The saved file failed its check after copying ({ok}, {n_back} rows vs {len(P)}): {out_path}")
+
+    say(f"Saved {out_path}")
+    say(f"  {len(P)} rows, {P['roster_player_id'].nunique()} players, {len(collisions)} tag collisions, "
+        f"{int(joins['flagged'].sum()) if len(joins) else 0} implausible joins, {time.time() - t0:.1f} s")
+    return {"path": out_path, "rows": int(len(P)), "quality": quality, "collisions": collisions, "joins": joins, "segments": segments, "info": info}
+
+
+def check_current(game_id, out_path=None):
+    """Is the saved file still built from the current detections DB and tags? {current, reasons[], built_at}."""
+    config, paths, _, _, _ = _app()
+    out_path = out_path or players_db_path(game_id)
+    if not os.path.isfile(out_path):
+        return {"current": False, "reasons": ["no saved file yet"], "built_at": None}
+    conn = sqlite3.connect(f"file:{out_path}?mode=ro", uri=True)
+    try:
+        info = dict(conn.execute("SELECT key, value FROM build_info").fetchall())
+    finally:
+        conn.close()
+    reasons = []
+    lconn = _ro(config.DB_PATH)
+    try:
+        tags = _load_tags(lconn, int(game_id))
+    finally:
+        lconn.close()
+    if _tags_hash(tags) != info.get("tags_hash"):
+        reasons.append("tags changed since the file was built")
+    db_path = paths.detections_db(int(game_id))
+    if not db_path or not os.path.isfile(db_path):
+        reasons.append("detections database not found")
+    else:
+        fp = _detections_fingerprint(db_path)
+        if fp["rows"] != int(info.get("detections_rows", -1)) or str(fp["max_player_id"]) != str(info.get("detections_max_player_id")):
+            reasons.append("detections database changed (row count or stitched ids differ): tags may point at different people")
+        elif abs(fp["mtime"] - float(info.get("detections_mtime", 0))) > 1:
+            reasons.append("detections database was re-written (same size, new date): check the stitched ids")
+    return {"current": not reasons, "reasons": reasons, "built_at": info.get("built_at")}

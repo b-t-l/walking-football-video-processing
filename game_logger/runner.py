@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from . import config, db, paths, repo
+from . import config, db, paths, repo, run_status
 
 STEPS = [
     ("detections", "Detections", "find players, goalkeepers and the ball in every frame (the long one)"),
@@ -21,6 +21,7 @@ STEPS = [
     ("detection_report", "Detection report", "scores each detection stage and says what to fix first (PDF, plus a review sheet to check by eye)"),
     ("match_report", "Match report", "12-page PDF: possession, territory, team shape, distance, speed, running, key moments"),
     ("opposition_report", "Opposition reports", "2 scouting PDFs (one per team, written for the other team's coach): style, strong and weak points, game plan"),
+    ("player_positions", "Player positions", "saves the named players' positions (your Identity tags resolved with fixed rules) as NNNN_players.db in the game's data folder, with quality checks and a list of tags that disagree; run it after tagging; agents and analysts read this file"),
     ("player_report", "Player report", "PDF: distance, max speed and pitch dots coloured by possession — pick one named player or a whole team"),
     ("annotation", "Annotated video", "the video with detections drawn on it"),
     ("team_images", "Team training images", "10 random frames: every player saved as a picture in the game's team-images folder, filed by what the team model says, to correct and upload to Roboflow"),
@@ -30,7 +31,7 @@ STEPS = [
     ("broadcast_pitch_images", "Broadcast Video Pitch Training Images", "40 full frames from the broadcast (edited) video, spaced across the match, saved in the game's broadcast-pitch-images folder to label pitch keypoints in Roboflow"),
 ]
 STEP_IDS = [s[0] for s in STEPS]
-NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "player_report", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
+NEEDS_DB = {"transformations", "detection_report", "match_report", "opposition_report", "player_report", "player_positions", "annotation", "team_images", "ball_images", "goal_detection", "youtube_description"}
 NEEDS_READY = {"detections", "transformations", "annotation"}
 NEEDS_EDITED_VIDEO = {"broadcast_pitch_images"}
 
@@ -134,7 +135,7 @@ def status():
 
 
 def start(conn, game_id, steps, duration_s=None, annotate_background=None, annotate_edited_pitch=None,
-          player_report_target=None):
+          player_report_target=None, allow_stale=False):
     steps = [s for s in STEP_IDS if s in set(steps or [])]       # keep the pipeline's own order
     if not steps:
         raise repo.ValidationError("Tick at least one stage to run")
@@ -186,6 +187,23 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
         if info["set"] and not info["exists"]:
             raise repo.ValidationError(f"The data folder {info['path']} is not connected. Connect the drive first.")
 
+        gate_notes = []
+        if not duration_s:                                       # test runs use separate files and are not gated
+            gt = run_status.gate(game_id, conn, steps, pr_target, live=False)
+            if gt["blockers"]:
+                raise repo.ValidationError(gt["blockers"])
+            if gt["stale"] and not allow_stale:
+                raise repo.ValidationError(gt["stale"])
+            if gt["add"]:
+                steps = [s for s in STEP_IDS if s in set(steps) | set(gt["add"])]
+            gate_notes = gt["notes"]
+            if gt["stale"]:
+                gate_notes.append("Ran anyway with out-of-date upstream steps: " + " | ".join(gt["stale"]))
+            if ("detections" in steps or "transformations" in steps):
+                saved = run_status.backup_tags(conn, game_id)
+                if saved:
+                    gate_notes.append("Tags saved to " + os.path.basename(saved) + " before the ids are re-created.")
+
         notes = []
         dbp = _db_path(g)
         if dbp and duration_s:
@@ -203,6 +221,7 @@ def start(conn, game_id, steps, duration_s=None, annotate_background=None, annot
         if "player_report" in steps:
             notes.append(f"Player report target: {pr_target}")
 
+        notes.extend(gate_notes)
         folder = log_folder(game_id)
         os.makedirs(folder, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
